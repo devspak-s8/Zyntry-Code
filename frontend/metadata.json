@@ -1,0 +1,6 @@
+{
+  "name": "Zyntry Code",
+  "description": "Lightweight VS Code engineering agent powered by Zyntry. Understands codebases, decomposes tasks, routes models adaptively, verifies deterministically, and escalates only when necessary.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

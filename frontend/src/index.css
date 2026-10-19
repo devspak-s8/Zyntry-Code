@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-app: #0D1217;
+    --bg-sidebar: #0F141A;
+    --bg-main: #0E1318;
+    --bg-elevated: #151D24;
+    --bg-hover: #1A242D;
+    --border-subtle: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --text-primary: #F3F4F6;
+    --text-secondary: #9CA3AF;
+    --text-muted: #6B7280;
+    --brand-accent: #93C5FD;
+    --warning-amber: #F4C76A;
+    --error-red: #FF7D7D;
+    --info-blue: #82B9FF;
+    --diff-add-bg: rgba(74, 222, 128, 0.1);
+    --diff-remove-bg: rgba(255, 125, 125, 0.1);
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--bg-app);
+    background-image: 
+      radial-gradient(ellipse 70% 40% at 50% -5%, rgba(255, 255, 255, 0.03), transparent 70%),
+      radial-gradient(circle at 100% 0%, rgba(147, 197, 253, 0.02), transparent 50%);
+    background-attachment: fixed;
+    color: var(--text-primary);
+    overflow: hidden;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+}
+
+/* Subtle clean dark utilities - No green glowing gradients */
+.glow-accent {
+  box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.4);
+}
+
+.glow-card {
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6), 0 0 1px 1px rgba(255, 255, 255, 0.06);
+}
+
+.bubbly-card {
+  transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.bubbly-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.6), 0 0 1px 1px rgba(255, 255, 255, 0.12);
+}
+
+/* Custom minimal scrollbar for bubbly IDE interface */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(85, 230, 165, 0.35);
+}
+
