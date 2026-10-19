@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Local secrets (never commit real keys)
+.dev.vars
+.env
+
+# Cloudflare / Wrangler
+.wrangler/
+node_modules/
+.venv-workers/
+python_modules/
+worker-env/
+
+# Docker (local worker state)
+worker-data/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,47 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "zyntry-code",
+	"main": "src/worker.py",
+	"compatibility_date": "2026-10-17",
+	"compatibility_flags": ["python_workers"],
+
+	// D1 (SQLite) database. Create it once with:
+	//   uv run pywrangler d1 create zyntry-code
+	// then copy the returned database_id into "database_id" below.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "zyntry-code",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	// Workers AI binding (edge inference). No API key required.
+	"ai": { "binding": "AI" },
+
+	// Durable Workflow for long-running plan execution.
+	"workflows": [
+		{
+			"name": "zyntry-code-execution",
+			"binding": "EXECUTION_WORKFLOW",
+			"class_name": "ZyntryCodeExecutionWorkflow"
+		}
+	],
+
+	// Non-secret configuration. API keys are SECRETS: do NOT put them here.
+	//   local dev:  put keys in .dev.vars
+	//   production: uv run pywrangler secret put OPENAI_API_KEY
+	// API_TOKEN is optional: set it (as a secret) to require a Bearer token on all routes.
+	"vars": {
+		"PROVIDER_ORDER": "openai,anthropic,workers_ai",
+		"OPENAI_BASE_URL": "https://api.openai.com/v1",
+		"ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+		"MAX_ATTEMPTS_PER_STAGE": "2",
+		"DEFAULT_BUDGET_USD": "5.0",
+		"ALLOWED_ORIGINS": "*",
+		"RATE_LIMIT_PER_MINUTE": "120"
+	},
+
+	"observability": { "enabled": true }
+}

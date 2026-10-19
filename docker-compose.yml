@@ -1,0 +1,34 @@
+# Zyntry Code — execution worker on a VPS/container host.
+#
+#   docker compose up -d            # start the worker (auto-restarts)
+#   docker compose logs -f worker   # follow it
+#
+# Point ZYNTRY_BACKEND_URL at your deployed Zyntry backend
+# (e.g. https://your-worker.workers.dev). ZYNTRY_TOKEN is the same API_TOKEN
+# the backend enforces (leave empty if the backend has no auth).
+
+services:
+  worker:
+    build: .
+    restart: unless-stopped
+    environment:
+      ZYNTRY_BACKEND_URL: ${ZYNTRY_BACKEND_URL:-http://host.docker.internal:8787}
+      ZYNTRY_TOKEN: ${ZYNTRY_TOKEN:-}
+      ZYNTRY_WORKER_NAME: ${ZYNTRY_WORKER_NAME:-default}
+      # Kernel-enforced caps per command (CPU seconds / address-space MB).
+      # A `while True` loop or a memory bomb is killed by the OS, not the worker.
+      ZYNTRY_CPU_LIMIT_SECONDS: ${ZYNTRY_CPU_LIMIT_SECONDS:-120}
+      ZYNTRY_MEM_LIMIT_MB: ${ZYNTRY_MEM_LIMIT_MB:-1024}
+    volumes:
+      # Persistent workspace checkouts + background-process logs.
+      - ./worker-data:/workspaces
+    # Isolate the worker on its own bridge network. For a fully air-gapped
+    # worker, set `internal: true` below (blocks all egress — only usable if
+    # the backend is reachable on the host without internet).
+    networks:
+      - worker-net
+
+networks:
+  worker-net:
+    driver: bridge
+    # internal: true   # uncomment for strict egress isolation

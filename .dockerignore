@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+.venv-workers
+.pytest_cache
+.wrangler
+.node_modules
+__pycache__
+*.pyc
+.env
+.dev.vars
+worker-data
+workspaces
+vscode-ext
+.idea
+.vscode

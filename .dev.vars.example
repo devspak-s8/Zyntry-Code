@@ -1,0 +1,20 @@
+# Copy this file to `.dev.vars` (same directory) and fill in your keys.
+# `.dev.vars` is read by `pywrangler dev` for LOCAL development only and is
+# git-ignored. For production, use: uv run pywrangler secret put <NAME>
+
+# OpenAI-compatible (works with OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, ...)
+OPENAI_API_KEY=sk-your-key-here
+# OPENAI_BASE_URL=https://api.openai.com/v1
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Optional: require "Authorization: Bearer <token>" on all routes except /health
+# API_TOKEN=change-me
+
+# Optional overrides (defaults shown)
+# PROVIDER_ORDER=openai,anthropic,workers_ai
+# MAX_ATTEMPTS_PER_STAGE=2
+# DEFAULT_BUDGET_USD=5.0
+# ALLOWED_ORIGINS=*
+# RATE_LIMIT_PER_MINUTE=120

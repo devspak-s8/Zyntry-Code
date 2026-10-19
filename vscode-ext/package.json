@@ -1,0 +1,53 @@
+{
+  "name": "zyntry-code",
+  "displayName": "Zyntry Code",
+  "description": "Create, approve, run, and stream AI-planned engineering tasks; ingest your repo; and serve as the local execution runner.",
+  "version": "0.1.0",
+  "publisher": "zyntry",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "zyntry.createTask", "title": "Zyntry: Create Task" },
+      { "command": "zyntry.approveTask", "title": "Zyntry: Approve / Reject Task" },
+      { "command": "zyntry.runTask", "title": "Zyntry: Run Task (sync)" },
+      { "command": "zyntry.streamTask", "title": "Zyntry: Run Task (stream)" },
+      { "command": "zyntry.ingestRepo", "title": "Zyntry: Ingest Repo Snapshot" },
+      { "command": "zyntry.createWorkspace", "title": "Zyntry: Create Workspace (local runner)" },
+      { "command": "zyntry.startLocalRunner", "title": "Zyntry: Start Local Runner" },
+      { "command": "zyntry.stopLocalRunner", "title": "Zyntry: Stop Local Runner" }
+    ],
+    "configuration": {
+      "title": "Zyntry Code",
+      "properties": {
+        "zyntry.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8787",
+          "description": "URL of the Zyntry Code backend (Cloudflare Worker or local dev server)."
+        },
+        "zyntry.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for the backend's API_TOKEN (leave empty when auth is disabled)."
+        },
+        "zyntry.runnerPollSeconds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "How often the local runner polls for tool requests."
+        },
+        "zyntry.runnerMaxFiles": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "description": "Maximum number of files included in a repo snapshot."
+        }
+      }
+    }
+  }
+}
