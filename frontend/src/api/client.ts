@@ -17,11 +17,12 @@ export interface BackendConfig {
 }
 
 /**
- * Default backend URL: connects out of the box. Override via
- * VITE_BACKEND_URL in a .env file, or by storing 'zyntry.backendUrl' in
- * localStorage (the badge UI does this).
+ * Default service URL: connects out of the box against the public Zyntry
+ * deployment. For local development, override via VITE_BACKEND_URL in a .env
+ * file, or by storing 'zyntry.backendUrl' in localStorage (the badge UI does
+ * this): http://localhost:8787
  */
-const DEFAULT_BACKEND_URL = 'http://localhost:8787';
+const DEFAULT_BACKEND_URL = 'https://code-api.zyntry.space';
 
 function envBackendUrl(): string {
   try {

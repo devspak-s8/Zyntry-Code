@@ -36,7 +36,7 @@ function config() {
 }
 
 function baseUrl() {
-  return String(config().get("backendUrl", "http://localhost:8787")).replace(/\/+$/, "");
+  return String(config().get("backendUrl", "https://code-api.zyntry.space")).replace(/\/+$/, "");
 }
 
 async function api(method, p, body, headers = {}) {

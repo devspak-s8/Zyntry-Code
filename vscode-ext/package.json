@@ -2,7 +2,7 @@
   "name": "zyntry-code",
   "displayName": "Zyntry Code",
   "description": "Create, approve, run, and stream AI-planned engineering tasks; ingest your repo; and serve as the local execution runner. Bundles the full Zyntry dashboard UI in the sidebar.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "ZyntryCode",
   "license": "MIT",
   "icon": "icon.png",
@@ -43,8 +43,8 @@
       "properties": {
         "zyntry.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8787",
-          "description": "URL of the Zyntry Code backend (Cloudflare Worker or local dev server)."
+          "default": "https://code-api.zyntry.space",
+          "description": "Zyntry Code service endpoint — ships pointed at the public deployment; set to http://localhost:8787 for local runs."
         },
         "zyntry.apiToken": {
           "type": "string",
