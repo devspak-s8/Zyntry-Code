@@ -5,6 +5,11 @@
 	"compatibility_date": "2026-10-17",
 	"compatibility_flags": ["python_workers"],
 
+	// Custom domain for the public API (kept in config so deploys never detach it).
+	"routes": [
+		{ "pattern": "code-api.zyntry.space", "zone_name": "zyntry.space", "custom_domain": true, "enabled": true }
+	],
+
 	// D1 (SQLite) database. Create it once with:
 	//   uv run pywrangler d1 create zyntry-code
 	// then copy the returned database_id into "database_id" below.
@@ -12,7 +17,7 @@
 		{
 			"binding": "DB",
 			"database_name": "zyntry-code",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "22606480-f851-4c6c-a8ef-c043cce2b5f0",
 			"migrations_dir": "migrations"
 		}
 	],
