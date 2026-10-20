@@ -63,53 +63,6 @@ async function api(method, p, body, headers = {}) {
   return data;
 }
 
-// ---------------------------------------------------------------------------
-// API token (self-healing 401s)
-// ---------------------------------------------------------------------------
-
-async function promptForToken() {
-  const token = await vscode.window.showInputBox({
-    prompt: "Paste the backend API_TOKEN (the value after 'API_TOKEN=' in the backend's .dev.vars)",
-    password: true,
-    ignoreFocusOut: true,
-  });
-  if (token === undefined) return undefined;
-  await config().update("apiToken", token, vscode.ConfigurationTarget.Global);
-  log("API token saved to user settings.");
-  vscode.window.showInformationMessage("Zyntry: API token saved.");
-  return token;
-}
-
-async function offerTokenSetup() {
-  const action = await vscode.window.showErrorMessage(
-    "Zyntry: the backend rejected the bearer token (HTTP 401).",
-    "Set API token…",
-    "How to fix",
-  );
-  if (action === "Set API token…") return promptForToken();
-  if (action === "How to fix") {
-    vscode.window.showInformationMessage(
-      "The backend checks 'Authorization: Bearer <token>' on every route except /health. " +
-        "Fix A: run 'Zyntry: Set API Token' and paste the SAME value as API_TOKEN in the backend's " +
-        ".dev.vars. Fix B: comment out the API_TOKEN line in .dev.vars and restart the backend to " +
-        "disable auth locally, then leave the extension token empty.",
-    );
-  }
-  return undefined;
-}
-
-async function withAuthRetry(fn) {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err && err.status === 401) {
-      const token = await offerTokenSetup();
-      if (token !== undefined) return fn();
-    }
-    throw err;
-  }
-}
-
 async function pickTaskId() {
   if (lastTaskId) return lastTaskId;
   const id = await vscode.window.showInputBox({ prompt: "Task id" });
@@ -138,7 +91,7 @@ async function createTask() {
   if (!prompt) return;
 
   try {
-    const result = await withAuthRetry(() => api("POST", "/tasks", { prompt }));
+    const result = await api("POST", "/tasks", { prompt });
     lastTaskId = result.task.id;
     log("task created:", result.task.id, result.plan.summary);
     output.appendLine(summarizePlan(result));
@@ -189,12 +142,10 @@ async function approveTask() {
   if (!choice) return;
   try {
     const approved = choice.label !== "Reject";
-    const result = await withAuthRetry(() =>
-      api("POST", `/tasks/${id}/approve`, {
-        approved,
-        auto_execute: choice.label === "Approve & run",
-      }),
-    );
+    const result = await api("POST", `/tasks/${id}/approve`, {
+      approved,
+      auto_execute: choice.label === "Approve & run",
+    });
     log("approve:", JSON.stringify(result));
     output.show();
   } catch (err) {
@@ -208,7 +159,7 @@ async function runTask() {
   output.show();
   log(`executing task ${id} (sync)…`);
   try {
-    const summary = await withAuthRetry(() => api("POST", `/tasks/${id}/execute`));
+    const summary = await api("POST", `/tasks/${id}/execute`);
     output.appendLine(JSON.stringify(summary, null, 2));
     const status = summary.task?.status || summary.execution?.status;
     vscode.window.showInformationMessage(`Zyntry: execution ${status}`);
@@ -222,20 +173,13 @@ async function streamTask() {
   if (!id) return;
   output.show();
   log(`streaming execution of task ${id}…`);
-  const openStream = () => {
-    const token = String(config().get("apiToken", ""));
-    const headers = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    return fetch(`${baseUrl()}/tasks/${id}/execute/stream`, {
-      method: "POST",
-      headers,
-    });
-  };
-  let resp = await openStream();
-  if (resp.status === 401) {
-    const saved = await offerTokenSetup();
-    if (saved !== undefined) resp = await openStream();
-  }
+  const token = String(config().get("apiToken", ""));
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/tasks/${id}/execute/stream`, {
+    method: "POST",
+    headers,
+  });
   if (!resp.ok) {
     vscode.window.showErrorMessage(`Zyntry: stream failed: HTTP ${resp.status}`);
     return;
@@ -330,7 +274,7 @@ async function ingestRepo() {
   await walk(root);
 
   try {
-    const result = await withAuthRetry(() => api("POST", `/tasks/${id}/repo`, { files }));
+    const result = await api("POST", `/tasks/${id}/repo`, { files });
     log(`ingested ${result.files_ingested} file(s) into task ${id}`);
     vscode.window.showInformationMessage(`Zyntry: ingested ${result.files_ingested} files`);
   } catch (err) {
@@ -358,9 +302,7 @@ async function createWorkspace() {
     prompt: "Repo URL (optional; local runner works in the open folder regardless)",
   });
   try {
-    const ws = await withAuthRetry(() =>
-      api("POST", "/workspaces", { provider: "local", repo_url: repoUrl || undefined }),
-    );
+    const ws = await api("POST", "/workspaces", { provider: "local", repo_url: repoUrl || undefined });
     if (ws.runner_token) workspaceTokens.set(ws.id, ws.runner_token);
     log("workspace created:", ws.id, "provider=local");
     output.appendLine(`runner token for ${ws.id}: ${ws.runner_token} (shown once)`);
@@ -669,17 +611,12 @@ function dashboardHandler(root) {
   };
 }
 
-// One-time seed: give the dashboard's localStorage the backend URL / API token
-// configured in VS Code settings, so it connects without manual setup. Values
-// edited later inside the UI (BackendBadge) always win over the seed.
+// The dashboard inherits the service URL from VS Code settings on first open;
+// values edited later inside the UI always win over the seed.
 function seedDashboardConfig(html) {
   const backend = baseUrl();
-  const token = String(config().get("apiToken", ""));
   let script = "<script>(function(){try{";
   script += `if(localStorage.getItem('zyntry.backendUrl')==null)localStorage.setItem('zyntry.backendUrl',${JSON.stringify(backend)});`;
-  if (token) {
-    script += `if(localStorage.getItem('zyntry.apiToken')==null)localStorage.setItem('zyntry.apiToken',${JSON.stringify(token)});`;
-  }
   script += "}catch(e){}})();</script>";
   return html.replace(/<head(\s[^>]*)?>/i, (m) => m + script);
 }
@@ -772,7 +709,6 @@ function activate(context) {
     reg("zyntry.startLocalRunner", startLocalRunner),
     reg("zyntry.stopLocalRunner", stopLocalRunner),
     reg("zyntry.openDashboard", openDashboard),
-    reg("zyntry.setApiToken", promptForToken),
     vscode.window.registerWebviewViewProvider("zyntry.dashboard", new DashboardViewProvider()),
   );
   log("Zyntry Code extension activated. Backend:", baseUrl());

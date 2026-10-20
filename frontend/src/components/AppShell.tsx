@@ -334,7 +334,7 @@ export const AppShell: React.FC = () => {
             id: `m-connect-${Date.now()}`,
             role: 'assistant',
             content:
-              'Connect the Zyntry backend first — click the "Not connected" badge (bottom-right) and enter the backend URL (e.g. http://localhost:8787).',
+              'Connect Zyntry first — click the "Not connected" badge (bottom-right) and enter the service URL (e.g. http://localhost:8787).',
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ],
@@ -367,7 +367,7 @@ export const AppShell: React.FC = () => {
           {
             id: `m-err-${Date.now()}`,
             role: 'assistant',
-            content: `Backend error: ${detail}`,
+            content: `Zyntry error: ${detail}`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ],

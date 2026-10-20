@@ -24,7 +24,7 @@ export const BackendBadge: React.FC = () => {
 
   const check = async (): Promise<boolean> => {
     setStatus('connecting');
-    setMessage('Contacting backend…');
+    setMessage('Contacting Zyntry…');
     try {
       const health = await api.health();
       setStatus('ok');
@@ -34,7 +34,7 @@ export const BackendBadge: React.FC = () => {
       return true;
     } catch (err) {
       setStatus('error');
-      setMessage(`Backend unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      setMessage(`Service unreachable: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
   };
@@ -49,7 +49,7 @@ export const BackendBadge: React.FC = () => {
     setBackendConfig({ backendUrl: url.trim(), apiToken: token.trim() });
     if (!url.trim()) {
       setStatus('unknown');
-      setMessage('Enter a backend URL to connect');
+      setMessage('Enter a service URL to connect');
       return;
     }
     const ok = await check();
@@ -65,7 +65,7 @@ export const BackendBadge: React.FC = () => {
           className="w-80 rounded-2xl border border-white/10 bg-[#121820]/95 backdrop-blur-xl p-4 shadow-2xl space-y-3"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-[#F2F6F4]">Connect Zyntry backend</span>
+            <span className="text-xs font-bold text-[#F2F6F4]">Connect Zyntry service</span>
             <button onClick={() => setOpen(false)} className="text-[#6F7B77] hover:text-[#F2F6F4]">
               <X size={14} />
             </button>
@@ -96,7 +96,7 @@ export const BackendBadge: React.FC = () => {
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
         onClick={() => setOpen((v) => !v)}
-        title={connected ? 'Backend connection' : 'Backend not connected — click to connect'}
+        title={connected ? 'Service connection' : 'Service not connected — click to connect'}
         className={`flex items-center gap-2 px-3.5 py-2 rounded-full border text-xs font-semibold shadow-lg backdrop-blur-xl cursor-pointer ${
           connected
             ? status === 'ok'

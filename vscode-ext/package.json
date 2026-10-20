@@ -29,7 +29,6 @@
     },
     "commands": [
       { "command": "zyntry.openDashboard", "title": "Zyntry: Open Dashboard" },
-      { "command": "zyntry.setApiToken", "title": "Zyntry: Set API Token" },
       { "command": "zyntry.createTask", "title": "Zyntry: Create Task" },
       { "command": "zyntry.approveTask", "title": "Zyntry: Approve / Reject Task" },
       { "command": "zyntry.runTask", "title": "Zyntry: Run Task (sync)" },
@@ -50,7 +49,7 @@
         "zyntry.apiToken": {
           "type": "string",
           "default": "",
-          "description": "Bearer token for the backend's API_TOKEN (leave empty when auth is disabled)."
+          "description": "Optional access credential for remote deployments (leave empty for local development)."
         },
         "zyntry.runnerPollSeconds": {
           "type": "number",
