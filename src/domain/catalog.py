@@ -51,12 +51,14 @@ MODELS: list[ModelSpec] = [
               frozenset({Capability.CODE, Capability.REASON, Capability.REVIEW, Capability.SECURITY, Capability.PLAN}), "slow"),
 
     # ---- Cloudflare Workers AI (edge inference, no API key) ----
-    ModelSpec("@cf/meta/llama-3.3-70b-instruct-fp8-fast", "workers_ai", "Llama 3.3 70B (fp8)", 2, 128_000, 0.0, 0.0,
+    # Catalog refreshed 2026-10: old @cf/meta/llama-3.3/4-scout and
+    # deepseek-v3-0324 were deprecated and return "5007: No such model".
+    ModelSpec("@cf/zai-org/glm-5.3-flash", "workers_ai", "GLM 5.3 Flash", 2, 1_048_576, 0.0, 0.0,
               frozenset({Capability.CODE, Capability.REASON}), "fast"),
-    ModelSpec("@cf/deepseek-ai/deepseek-v3-0324", "workers_ai", "DeepSeek V3", 3, 64_000, 0.0, 0.0,
+    ModelSpec("@cf/moonshotai/kimi-k2.7-code", "workers_ai", "Kimi K2.7 Code", 3, 262_144, 0.0, 0.0,
               frozenset({Capability.CODE, Capability.REASON, Capability.PLAN}), "balanced"),
-    ModelSpec("@cf/meta/llama-4-scout-17b-16e-instruct", "workers_ai", "Llama 4 Scout 17B", 2, 10_000_000, 0.0, 0.0,
-              frozenset({Capability.CODE, Capability.REASON, Capability.LONG_CONTEXT}), "fast"),
+    ModelSpec("@cf/zai-org/glm-5.3", "workers_ai", "GLM 5.3", 2, 1_048_576, 0.0, 0.0,
+              frozenset({Capability.CODE, Capability.REASON, Capability.LONG_CONTEXT}), "balanced"),
 ]
 
 
