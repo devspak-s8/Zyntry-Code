@@ -13,6 +13,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const { exec, execFile } = require("child_process");
+const http = require("http");
 
 let output; // vscode.OutputChannel
 let lastTaskId = null;
@@ -62,6 +63,53 @@ async function api(method, p, body, headers = {}) {
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// API token (self-healing 401s)
+// ---------------------------------------------------------------------------
+
+async function promptForToken() {
+  const token = await vscode.window.showInputBox({
+    prompt: "Paste the backend API_TOKEN (the value after 'API_TOKEN=' in the backend's .dev.vars)",
+    password: true,
+    ignoreFocusOut: true,
+  });
+  if (token === undefined) return undefined;
+  await config().update("apiToken", token, vscode.ConfigurationTarget.Global);
+  log("API token saved to user settings.");
+  vscode.window.showInformationMessage("Zyntry: API token saved.");
+  return token;
+}
+
+async function offerTokenSetup() {
+  const action = await vscode.window.showErrorMessage(
+    "Zyntry: the backend rejected the bearer token (HTTP 401).",
+    "Set API token…",
+    "How to fix",
+  );
+  if (action === "Set API token…") return promptForToken();
+  if (action === "How to fix") {
+    vscode.window.showInformationMessage(
+      "The backend checks 'Authorization: Bearer <token>' on every route except /health. " +
+        "Fix A: run 'Zyntry: Set API Token' and paste the SAME value as API_TOKEN in the backend's " +
+        ".dev.vars. Fix B: comment out the API_TOKEN line in .dev.vars and restart the backend to " +
+        "disable auth locally, then leave the extension token empty.",
+    );
+  }
+  return undefined;
+}
+
+async function withAuthRetry(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err && err.status === 401) {
+      const token = await offerTokenSetup();
+      if (token !== undefined) return fn();
+    }
+    throw err;
+  }
+}
+
 async function pickTaskId() {
   if (lastTaskId) return lastTaskId;
   const id = await vscode.window.showInputBox({ prompt: "Task id" });
@@ -90,7 +138,7 @@ async function createTask() {
   if (!prompt) return;
 
   try {
-    const result = await api("POST", "/tasks", { prompt });
+    const result = await withAuthRetry(() => api("POST", "/tasks", { prompt }));
     lastTaskId = result.task.id;
     log("task created:", result.task.id, result.plan.summary);
     output.appendLine(summarizePlan(result));
@@ -141,10 +189,12 @@ async function approveTask() {
   if (!choice) return;
   try {
     const approved = choice.label !== "Reject";
-    const result = await api("POST", `/tasks/${id}/approve`, {
-      approved,
-      auto_execute: choice.label === "Approve & run",
-    });
+    const result = await withAuthRetry(() =>
+      api("POST", `/tasks/${id}/approve`, {
+        approved,
+        auto_execute: choice.label === "Approve & run",
+      }),
+    );
     log("approve:", JSON.stringify(result));
     output.show();
   } catch (err) {
@@ -158,7 +208,7 @@ async function runTask() {
   output.show();
   log(`executing task ${id} (sync)…`);
   try {
-    const summary = await api("POST", `/tasks/${id}/execute`);
+    const summary = await withAuthRetry(() => api("POST", `/tasks/${id}/execute`));
     output.appendLine(JSON.stringify(summary, null, 2));
     const status = summary.task?.status || summary.execution?.status;
     vscode.window.showInformationMessage(`Zyntry: execution ${status}`);
@@ -172,13 +222,20 @@ async function streamTask() {
   if (!id) return;
   output.show();
   log(`streaming execution of task ${id}…`);
-  const token = String(config().get("apiToken", ""));
-  const headers = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/tasks/${id}/execute/stream`, {
-    method: "POST",
-    headers,
-  });
+  const openStream = () => {
+    const token = String(config().get("apiToken", ""));
+    const headers = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${baseUrl()}/tasks/${id}/execute/stream`, {
+      method: "POST",
+      headers,
+    });
+  };
+  let resp = await openStream();
+  if (resp.status === 401) {
+    const saved = await offerTokenSetup();
+    if (saved !== undefined) resp = await openStream();
+  }
   if (!resp.ok) {
     vscode.window.showErrorMessage(`Zyntry: stream failed: HTTP ${resp.status}`);
     return;
@@ -273,7 +330,7 @@ async function ingestRepo() {
   await walk(root);
 
   try {
-    const result = await api("POST", `/tasks/${id}/repo`, { files });
+    const result = await withAuthRetry(() => api("POST", `/tasks/${id}/repo`, { files }));
     log(`ingested ${result.files_ingested} file(s) into task ${id}`);
     vscode.window.showInformationMessage(`Zyntry: ingested ${result.files_ingested} files`);
   } catch (err) {
@@ -301,7 +358,9 @@ async function createWorkspace() {
     prompt: "Repo URL (optional; local runner works in the open folder regardless)",
   });
   try {
-    const ws = await api("POST", "/workspaces", { provider: "local", repo_url: repoUrl || undefined });
+    const ws = await withAuthRetry(() =>
+      api("POST", "/workspaces", { provider: "local", repo_url: repoUrl || undefined }),
+    );
     if (ws.runner_token) workspaceTokens.set(ws.id, ws.runner_token);
     log("workspace created:", ws.id, "provider=local");
     output.appendLine(`runner token for ${ws.id}: ${ws.runner_token} (shown once)`);
@@ -538,6 +597,165 @@ async function executeTool(req, ws) {
 }
 
 // ---------------------------------------------------------------------------
+// dashboard — the bundled web UI, served on loopback and shown in a webview
+// ---------------------------------------------------------------------------
+
+let dashboardServer = null;
+let dashboardPort = 0;
+
+const DASHBOARD_MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".wasm": "application/wasm",
+  ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".map": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+function dashboardRoot() {
+  return path.join(__dirname, "dashboard");
+}
+
+function dashboardHandler(root) {
+  return (req, res) => {
+    try {
+      let rel = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+      if (rel === "/" || rel === "") rel = "/index.html";
+      const file = path.normalize(path.join(root, rel));
+      if (file !== root && !file.startsWith(root + path.sep)) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      fs.readFile(file, (err, data) => {
+        if (err) {
+          // SPA fallback: unknown paths get the app shell.
+          fs.readFile(path.join(root, "index.html"), (err2, html) => {
+            if (err2) {
+              res.writeHead(404);
+              res.end("not found");
+              return;
+            }
+            res.writeHead(200, { "Content-Type": DASHBOARD_MIME[".html"], "Cache-Control": "no-store" });
+            res.end(html);
+          });
+          return;
+        }
+        const ext = path.extname(file).toLowerCase();
+        let body = data;
+        if (ext === ".html") body = Buffer.from(seedDashboardConfig(String(data)), "utf8");
+        res.writeHead(200, {
+          "Content-Type": DASHBOARD_MIME[ext] || "application/octet-stream",
+          "Cache-Control": "no-store",
+        });
+        res.end(body);
+      });
+    } catch {
+      res.writeHead(500);
+      res.end();
+    }
+  };
+}
+
+// One-time seed: give the dashboard's localStorage the backend URL / API token
+// configured in VS Code settings, so it connects without manual setup. Values
+// edited later inside the UI (BackendBadge) always win over the seed.
+function seedDashboardConfig(html) {
+  const backend = baseUrl();
+  const token = String(config().get("apiToken", ""));
+  let script = "<script>(function(){try{";
+  script += `if(localStorage.getItem('zyntry.backendUrl')==null)localStorage.setItem('zyntry.backendUrl',${JSON.stringify(backend)});`;
+  if (token) {
+    script += `if(localStorage.getItem('zyntry.apiToken')==null)localStorage.setItem('zyntry.apiToken',${JSON.stringify(token)});`;
+  }
+  script += "}catch(e){}})();</script>";
+  return html.replace(/<head(\s[^>]*)?>/i, (m) => m + script);
+}
+
+function listenOn(port, root) {
+  return new Promise((resolve) => {
+    const server = http.createServer(dashboardHandler(root));
+    server.once("error", () => resolve(null));
+    server.listen(port, "127.0.0.1", () => {
+      server.on("error", (e) => log("dashboard server error:", e.message));
+      resolve(server);
+    });
+  });
+}
+
+async function startDashboardServer() {
+  if (dashboardServer) return dashboardPort;
+  const root = dashboardRoot();
+  if (!fs.existsSync(path.join(root, "index.html"))) {
+    log("dashboard: bundled UI not found at", root);
+    return 0;
+  }
+  for (const port of [8799, 8800, 8801, 8802, 8803]) {
+    const server = await listenOn(port, root);
+    if (server) {
+      dashboardServer = server;
+      dashboardPort = port;
+      log(`dashboard UI served at http://127.0.0.1:${port}`);
+      return port;
+    }
+  }
+  log("dashboard: no free port in 8799-8803");
+  return 0;
+}
+
+class DashboardViewProvider {
+  async resolveWebviewView(view) {
+    view.webview.options = { enableScripts: true };
+    const port = await startDashboardServer();
+    if (!port) {
+      view.webview.html =
+        '<html><body style="font-family:sans-serif;padding:16px;color:#9aa7b4;background:#0D1217">' +
+        "<h3>Zyntry dashboard not bundled</h3><p>This install was built without the dashboard UI. " +
+        "Use the frontend dev server (npm run dev in frontend/, http://localhost:3000) or repackage " +
+        "the extension from the repo.</p></body></html>";
+      return;
+    }
+    view.webview.html =
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; frame-src http://127.0.0.1:* http://localhost:*; style-src \'unsafe-inline\';">' +
+      "<style>html,body{margin:0;padding:0;height:100%;background:#0D1217;overflow:hidden}" +
+      "iframe{border:0;width:100%;height:100%;display:block}</style></head>" +
+      `<body><iframe src="http://127.0.0.1:${port}/"></iframe></body></html>`;
+    log("dashboard webview attached");
+  }
+}
+
+async function openDashboard() {
+  const port = await startDashboardServer();
+  if (!port) {
+    vscode.window.showErrorMessage(
+      "Zyntry: bundled dashboard missing. Run the frontend dev server (npm run dev in frontend/) and open http://localhost:3000",
+    );
+    return;
+  }
+  const url = `http://127.0.0.1:${port}/`;
+  try {
+    await vscode.commands.executeCommand("simpleBrowser.show", vscode.Uri.parse(url));
+    return;
+  } catch {
+    /* Simple Browser unavailable — fall through to the system browser */
+  }
+  vscode.env.openExternal(vscode.Uri.parse(url));
+}
+
+// ---------------------------------------------------------------------------
 // activation
 // ---------------------------------------------------------------------------
 
@@ -553,6 +771,9 @@ function activate(context) {
     reg("zyntry.createWorkspace", createWorkspace),
     reg("zyntry.startLocalRunner", startLocalRunner),
     reg("zyntry.stopLocalRunner", stopLocalRunner),
+    reg("zyntry.openDashboard", openDashboard),
+    reg("zyntry.setApiToken", promptForToken),
+    vscode.window.registerWebviewViewProvider("zyntry.dashboard", new DashboardViewProvider()),
   );
   log("Zyntry Code extension activated. Backend:", baseUrl());
 }
@@ -560,6 +781,10 @@ function activate(context) {
 function deactivate() {
   if (runnerTimer) clearInterval(runnerTimer);
   runnerRunning = false;
+  if (dashboardServer) {
+    dashboardServer.close();
+    dashboardServer = null;
+  }
 }
 
 module.exports = { activate, deactivate };

@@ -1,7 +1,25 @@
 # Zyntry Code — VS Code extension
 
 The client half of Zyntry Code: drive tasks against the backend and run the
-whole loop locally.
+whole loop locally — now with the **full Zyntry dashboard UI bundled**.
+
+## Dashboard (bundled UI)
+
+The extension ships the Zyntry web dashboard inside the `.vsix`:
+
+- **Sidebar panel** — click the Zyntry icon in the activity bar. The full UI
+  (chat, plan stages, live stream, diffs, verification, evidence packs) docks
+  into VS Code like any other panel.
+- **Zyntry: Open Dashboard** — opens the same UI in a wide editor tab
+  (Simple Browser) or your system browser.
+
+The UI is served from a loopback-only local server (ports 8799–8803) started
+by the extension itself — no separate dev server needed. On first open it
+inherits `zyntry.backendUrl` / `zyntry.apiToken` from VS Code settings; after
+that the in-app BackendBadge is the source of truth for the webview.
+
+> Refreshing the bundled UI: in `frontend/` run `npm ci && npm run build`,
+> then copy `frontend/dist/` into `vscode-ext/dashboard/` and repackage.
 
 ## Install (dev)
 
@@ -14,6 +32,8 @@ whole loop locally.
 
 | Command | What it does |
 | ------- | ------------ |
+| **Zyntry: Open Dashboard** | Open the bundled dashboard UI (sidebar, Simple Browser tab, or system browser). |
+| **Zyntry: Set API Token** | Prompt for the backend `API_TOKEN` and save it to settings. |
 | **Zyntry: Create Task** | Prompt for a task → `POST /tasks` → shows the LLM-only plan; offers approve (high-risk) or run. A 503 with a clear reason means the backend has no configured LLM provider. |
 | **Zyntry: Approve / Reject Task** | Approve (optionally auto-execute) or reject a high-risk task. |
 | **Zyntry: Run Task (sync)** | `POST /tasks/{id}/execute` → prints the audit summary. |
@@ -30,6 +50,15 @@ whole loop locally.
 | `zyntry.apiToken` | *(empty)* | Bearer token when the backend has `API_TOKEN` set |
 | `zyntry.runnerPollSeconds` | `3` | Local runner poll interval |
 | `zyntry.runnerMaxFiles` | `200` | Repo snapshot file cap |
+
+## Auth (HTTP 401s)
+
+- When the backend has `API_TOKEN` set in its `.dev.vars`, every route except
+  `/health` requires `Authorization: Bearer <token>`.
+- On any 401, task commands now prompt **"Set API token…"** — paste the same
+  value and the extension saves it to `zyntry.apiToken`, then retries once.
+- To run without auth locally, comment out the `API_TOKEN` line in the
+  backend's `.dev.vars` and restart it; leave the extension token empty.
 
 ## Security notes
 

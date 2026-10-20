@@ -1,18 +1,35 @@
 {
   "name": "zyntry-code",
   "displayName": "Zyntry Code",
-  "description": "Create, approve, run, and stream AI-planned engineering tasks; ingest your repo; and serve as the local execution runner.",
-  "version": "0.1.0",
-  "publisher": "zyntry",
+  "description": "Create, approve, run, and stream AI-planned engineering tasks; ingest your repo; and serve as the local execution runner. Bundles the full Zyntry dashboard UI in the sidebar.",
+  "version": "0.3.0",
+  "publisher": "ZyntryCode",
   "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devspak-s8/Zyntry-Code"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
   "main": "./extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onView:zyntry.dashboard"],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "zyntry-sidebar", "title": "Zyntry", "icon": "media/zyntry.svg" }
+      ]
+    },
+    "views": {
+      "zyntry-sidebar": [
+        { "type": "webview", "id": "zyntry.dashboard", "name": "Dashboard" }
+      ]
+    },
     "commands": [
+      { "command": "zyntry.openDashboard", "title": "Zyntry: Open Dashboard" },
+      { "command": "zyntry.setApiToken", "title": "Zyntry: Set API Token" },
       { "command": "zyntry.createTask", "title": "Zyntry: Create Task" },
       { "command": "zyntry.approveTask", "title": "Zyntry: Approve / Reject Task" },
       { "command": "zyntry.runTask", "title": "Zyntry: Run Task (sync)" },

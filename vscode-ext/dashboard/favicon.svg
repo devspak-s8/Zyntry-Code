@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="rivet-graphite-stem" x1="6" y1="4" x2="12" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F1F5F9" />
+      <stop offset="40%" stop-color="#94A3B8" />
+      <stop offset="100%" stop-color="#475569" />
+    </linearGradient>
+    <linearGradient id="rivet-graphite-loop" x1="12" y1="4" x2="26" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#CBD5E1" />
+      <stop offset="50%" stop-color="#64748B" />
+      <stop offset="100%" stop-color="#334155" />
+    </linearGradient>
+    <filter id="rivet-mint-glow" x="6" y="9" width="16" height="16" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="1" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="#0D1217" />
+  <rect x="5.5" y="4" width="5.5" height="24" rx="2.75" fill="url(#rivet-graphite-stem)" />
+  <path d="M10 6.5H18.5C22.6421 6.5 26 9.85786 26 14C26 18.1421 22.6421 21.5 18.5 21.5H12M17 20.5L25.5 28" stroke="url(#rivet-graphite-loop)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="11" cy="14" r="4.5" fill="#0B0F14" />
+  <circle cx="11" cy="14" r="3" fill="#55E6A5" filter="url(#rivet-mint-glow)" />
+  <circle cx="10.2" cy="13.2" r="1" fill="#FFFFFF" opacity="0.8" />
+</svg>

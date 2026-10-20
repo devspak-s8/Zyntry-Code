@@ -1,0 +1,5 @@
+.vscode/**
+.vscodeignore
+**/*.map
+.prettierignore
+esbuild.js
