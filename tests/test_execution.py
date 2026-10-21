@@ -26,7 +26,8 @@ class AlwaysValidProvider:
 
 
 class EscalatingProvider:
-    """Fails its first code-producing call, then succeeds — to exercise escalation."""
+    """Fails its first code-producing call, then succeeds — to exercise the
+    auto-repair pass (same model retries once with the check output)."""
 
     name = "fake"
 
@@ -37,6 +38,24 @@ class EscalatingProvider:
     async def complete(self, model, prompt, system=None, temperature=0.2, max_tokens=None):
         if not self.failed_once and "resulting code" in prompt:
             self.failed_once = True
+            return LLMResult(text="```python\ndef broken(:\n```", model=model,
+                             provider="fake", tokens_in=10, tokens_out=10)
+        return LLMResult(text=VALID_PYTHON, model=model, provider="fake", tokens_in=10, tokens_out=10)
+
+
+class RepairFailsProvider:
+    """Fails its first TWO code-producing calls, then succeeds — the repair pass
+    fails too, so the engine must escalate to the stronger model."""
+
+    name = "fake"
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.failures = 0
+
+    async def complete(self, model, prompt, system=None, temperature=0.2, max_tokens=None):
+        if "resulting code" in prompt and self.failures < 2:
+            self.failures += 1
             return LLMResult(text="```python\ndef broken(:\n```", model=model,
                              provider="fake", tokens_in=10, tokens_out=10)
         return LLMResult(text=VALID_PYTHON, model=model, provider="fake", tokens_in=10, tokens_out=10)
@@ -64,9 +83,9 @@ def patch_escalating(monkeypatch, runtime):
     return _patch(monkeypatch, runtime, EscalatingProvider, [FAKE_FAST, FAKE_STRONG])
 
 
-async def _create_task(runtime, prompt):
+async def _create_task(runtime, prompt, max_attempts: int = 2):
     result = await fake_create_and_plan(runtime, prompt=prompt, repo=None, constraints=None,
-                                        max_attempts_per_stage=2, budget_usd=None)
+                                        max_attempts_per_stage=max_attempts, budget_usd=None)
     return result["task"]["id"]
 
 
@@ -83,8 +102,23 @@ async def test_execute_completes_end_to_end(runtime, patch_valid):
     assert summary["cost"]["estimated_usd"] == 0.0
 
 
-async def test_execute_escalates_on_verification_failure(runtime, patch_escalating):
+async def test_execute_repairs_on_verification_failure(runtime, patch_escalating):
+    """First verification failure feeds the check output back to the SAME model
+    (auto-repair) before any escalation — and the repair passes."""
     task_id = await _create_task(runtime, "Add a new API endpoint to return user profiles")
+    from executor import execute_task
+    summary = await execute_task(runtime, task_id)
+
+    assert summary["task"]["status"] == "completed"
+    assert summary["escalation"]["occurred"] is False
+    assert summary["attempts"]["total"] > len(summary["stages"])  # repair attempts recorded
+
+
+async def test_execute_escalates_after_repair_fails(runtime, monkeypatch):
+    """When the repair pass fails too, the engine escalates to a stronger model."""
+    _patch(monkeypatch, runtime, RepairFailsProvider, [FAKE_FAST, FAKE_STRONG])
+    task_id = await _create_task(runtime, "Add a new API endpoint to return user profiles",
+                                 max_attempts=3)
     from executor import execute_task
     summary = await execute_task(runtime, task_id)
 

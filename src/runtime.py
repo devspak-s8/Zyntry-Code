@@ -48,6 +48,12 @@ class Runtime:
         except (TypeError, ValueError):
             return default
 
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     @property
     def workers_ai(self) -> Any:
         return getattr(self.env, "AI", None) if self.env is not None else None

@@ -209,9 +209,13 @@ def test_workspace_lifecycle_and_bridge(runtime):
     assert ws["commands"]["test"]["cmd"] == "pytest"
 
     ws_id = ws["id"]
+    runner_headers = {"x-runner-id": "w1"}
+    if runtime.get("RUNNER_TOKEN"):
+        runner_headers["x-runner-token"] = runtime.get("RUNNER_TOKEN")
 
     # Runner reports state.
-    r = client.post(f"/workspaces/{ws_id}/state", json={"status": "ready", "base_commit": "abc123"})
+    r = client.post(f"/workspaces/{ws_id}/state", json={"status": "ready", "base_commit": "abc123"},
+                    headers=runner_headers)
     assert r.status_code == 200 and r.json()["status"] == "ready"
 
     # Dispatch a verification command and a file apply.
@@ -239,13 +243,14 @@ def test_workspace_lifecycle_and_bridge(runtime):
             attempt_id="attempt-1", command_key="test", command="pytest",
             verify_as="tests", dangerous=False))
 
-    # Runner claims it.
-    r = client.get(f"/workspaces/{ws_id}/tool-requests/next", headers={"x-runner-id": "w1"})
+    # Runner claims it (runner credential required when RUNNER_TOKEN is set).
+    r = client.get(f"/workspaces/{ws_id}/tool-requests/next", headers=runner_headers)
     assert r.status_code == 200 and r.json()["tool_request"]["status"] == "dispatched"
 
     # Runner posts a failing result -> becomes a verification report.
     r = client.post(f"/workspaces/{ws_id}/tool-requests/{req_id}/result",
-                    json={"status": "failed", "result": {"exit_code": 1, "stdout": "", "stderr": "boom"}})
+                    json={"status": "failed", "result": {"exit_code": 1, "stdout": "", "stderr": "boom"}},
+                    headers=runner_headers)
     assert r.status_code == 200
 
     reports = aio.run(store.get_verification_reports(runtime.db, stage_id))
@@ -279,7 +284,9 @@ def test_dangerous_command_requires_approval(runtime):
                     json={"approved": True})
     assert r.status_code == 200 and r.json()["status"] == "queued"
 
-    r = client.get(f"/workspaces/{ws_id}/tool-requests/next")
+    r = client.get(f"/workspaces/{ws_id}/tool-requests/next",
+                   headers={"x-runner-token": runtime.get("RUNNER_TOKEN")}
+                   if runtime.get("RUNNER_TOKEN") else None)
     assert r.json()["tool_request"]["id"] == req["id"]
 
 

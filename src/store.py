@@ -3,6 +3,8 @@
 from typing import Any
 
 from db import Database
+from secret_crypto import decrypt, encrypt
+from security import is_sensitive_path
 from util import json_dumps, json_loads, now_iso, uuid_str
 
 _TASK_COLS = ("id", "prompt", "repo", "status", "risk_level", "complexity", "task_kind", "constraints", "created_at", "updated_at")
@@ -11,6 +13,7 @@ _STAGE_COLS = ("id", "plan_id", "kind", "title", "description", "dependencies", 
 _EXEC_COLS = ("id", "task_id", "plan_id", "status", "attempt_count", "escalation_count", "total_cost", "total_tokens", "started_at", "finished_at", "summary")
 _ATTEMPT_COLS = ("id", "execution_id", "stage_id", "attempt_number", "model_id", "provider", "status", "input_prompt", "output", "verification_status", "verification_output", "tokens_in", "tokens_out", "cost", "latency_ms", "error", "created_at", "finished_at")
 _EVENT_COLS = ("id", "execution_id", "task_id", "stage_id", "type", "message", "data", "created_at")
+_TASK_UPDATE_FIELDS = {"prompt", "repo", "status", "risk_level", "complexity", "task_kind", "constraints"}
 
 
 # ---- tasks -----------------------------------------------------------------
@@ -39,6 +42,9 @@ async def list_tasks(db: Database, limit: int = 50) -> list[dict]:
 async def update_task(db: Database, task_id: str, **fields: Any) -> None:
     if not fields:
         return
+    unknown = set(fields) - _TASK_UPDATE_FIELDS
+    if unknown:
+        raise ValueError(f"unsupported task fields: {sorted(unknown)}")
     sets = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values())
     await db.execute(f"UPDATE tasks SET {sets}, updated_at = ? WHERE id = ?", (*values, now_iso(), task_id))
@@ -162,16 +168,18 @@ async def replace_repo_files(db: Database, task_id: str, files: list[dict]) -> i
     """Replace the repo file snapshot for a task. Each file dict: path, language, size, content."""
     await db.execute("DELETE FROM repo_files WHERE task_id = ?", (task_id,))
     ts = now_iso()
-    for f in files:
+    safe_files = [f for f in files if not is_sensitive_path(str(f.get("path", "")))]
+    for f in safe_files:
         await db.execute(
             "INSERT INTO repo_files (id, task_id, path, language, size, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (uuid_str(), task_id, f.get("path", ""), f.get("language"), int(f.get("size", 0)), f.get("content"), ts),
         )
-    return len(files)
+    return len(safe_files)
 
 
 async def get_repo_files(db: Database, task_id: str) -> list[dict]:
-    return await db.query("SELECT * FROM repo_files WHERE task_id = ? ORDER BY path ASC", (task_id,), _REPO_FILE_COLS)
+    rows = await db.query("SELECT * FROM repo_files WHERE task_id = ? ORDER BY path ASC", (task_id,), _REPO_FILE_COLS)
+    return [row for row in rows if not is_sensitive_path(str(row.get("path", "")))]
 
 
 # ---- artifacts --------------------------------------------------------------
@@ -260,6 +268,23 @@ async def get_routing_stats(db: Database, stage_kind: str, risk_level: str) -> d
     return {r["model_id"]: r for r in rows}
 
 
+async def get_global_routing_stats(db: Database) -> dict[str, dict]:
+    """Per-model record across every stage kind — the prior that task-specific
+    reliability estimates are shrunk toward when evidence is sparse."""
+    rows = await db.query(
+        """
+        SELECT model_id,
+               SUM(attempts)  AS attempts,
+               SUM(successes) AS successes,
+               SUM(failures)  AS failures,
+               SUM(escalations) AS escalations
+        FROM routing_stats
+        GROUP BY model_id
+        """,
+        (), ("model_id", "attempts", "successes", "failures", "escalations"))
+    return {r["model_id"]: r for r in rows}
+
+
 # ---- workspaces -------------------------------------------------------------
 
 _WORKSPACE_COLS = ("id", "task_id", "repo_url", "branch", "base_commit", "head_commit", "workdir",
@@ -299,9 +324,21 @@ async def pending_workspaces(db: Database, provider: str, limit: int = 10) -> li
         (provider, limit), _WORKSPACE_COLS)
 
 
+async def list_all_workspaces(db: Database, limit: int = 50) -> list[dict]:
+    """Every workspace (for the frontend runner panel)."""
+    return await db.query(
+        "SELECT * FROM workspaces ORDER BY created_at DESC LIMIT ?", (limit,), _WORKSPACE_COLS)
+
+
 async def update_workspace(db: Database, workspace_id: str, **fields: Any) -> None:
     if not fields:
         return
+    allowed = {"task_id", "repo_url", "branch", "base_commit", "head_commit", "workdir",
+               "status", "commands", "env", "allowed_commands", "auto_commit",
+               "timeout_seconds", "runner_id", "runner_token", "error", "mcp_servers"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"unsupported workspace fields: {sorted(unknown)}")
     sets = ", ".join(f"{k} = ?" for k in fields)
     await db.execute(f"UPDATE workspaces SET {sets}, updated_at = ? WHERE id = ?",
                      (*fields.values(), now_iso(), workspace_id))
@@ -314,6 +351,23 @@ def workspace_dict(row: dict) -> dict:
     d["allowed_commands"] = json_loads(d.get("allowed_commands"), [])
     d["mcp_servers"] = json_loads(d.get("mcp_servers"), [])
     return d
+
+
+def workspace_public_dict(row: dict) -> dict:
+    """Return workspace metadata without runner credentials or environment values."""
+    d = workspace_dict(row)
+    d.pop("runner_token", None)
+    d.pop("env", None)
+    d["mcp_servers"] = [
+        {key: value for key, value in server.items() if key != "env"}
+        for server in (d.get("mcp_servers") or [])
+    ]
+    return d
+
+
+def workspace_runner_dict(row: dict) -> dict:
+    """Full workspace configuration, only for an authenticated runner."""
+    return workspace_dict(row)
 
 
 # ---- tool requests ----------------------------------------------------------
@@ -368,6 +422,11 @@ async def next_queued_tool_request(db: Database, workspace_id: str, runner_id: s
 async def update_tool_request(db: Database, request_id: str, **fields: Any) -> None:
     if not fields:
         return
+    allowed = {"execution_id", "stage_id", "tool", "params", "verify_as", "dangerous",
+               "status", "result", "dispatched_at", "finished_at", "attempt_id"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"unsupported tool request fields: {sorted(unknown)}")
     sets = ", ".join(f"{k} = ?" for k in fields)
     await db.execute(f"UPDATE tool_requests SET {sets} WHERE id = ?", (*fields.values(), request_id))
 
@@ -376,6 +435,28 @@ def tool_request_dict(row: dict) -> dict:
     d = dict(row)
     d["params"] = json_loads(d.get("params"), {})
     d["result"] = json_loads(d.get("result"), None)
+    return d
+
+
+_SENSITIVE_PARAM_KEYS = {"token", "password", "secret", "api_key", "apikey",
+                         "authorization", "env", "private_key"}
+
+
+def _redact_sensitive(value):
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if key.lower() in _SENSITIVE_PARAM_KEYS else _redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
+
+
+def tool_request_public_dict(row: dict) -> dict:
+    d = tool_request_dict(row)
+    d["params"] = _redact_sensitive(d.get("params") or {})
+    d["result"] = _redact_sensitive(d.get("result"))
     return d
 
 
@@ -434,20 +515,23 @@ async def list_workers(db: Database) -> list[dict]:
 
 # ---- secrets (workspace-scoped credentials) ---------------------------------
 
-async def set_secret(db: Database, workspace_id: str, key: str, value: str) -> None:
+async def set_secret(db: Database, workspace_id: str, key: str, value: str,
+                     encryption_key: str | None) -> None:
+    encrypted = encrypt(value, encryption_key)
     existing = await db.query_one("SELECT id FROM secrets WHERE workspace_id = ? AND key = ?",
                                   (workspace_id, key), ("id",))
     if existing:
-        await db.execute("UPDATE secrets SET value = ? WHERE id = ?", (value, existing["id"]))
+        await db.execute("UPDATE secrets SET value = ? WHERE id = ?", (encrypted, existing["id"]))
     else:
         await db.execute(
             "INSERT INTO secrets (id, workspace_id, key, value, created_at) VALUES (?, ?, ?, ?, ?)",
-            (uuid_str(), workspace_id, key, value, now_iso()),
+            (uuid_str(), workspace_id, key, encrypted, now_iso()),
         )
 
 
-async def get_secrets(db: Database, workspace_id: str, keys: list[str] | None = None) -> dict[str, str]:
-    """Values are returned to runners ONLY inside claimed tool requests."""
+async def get_secrets(db: Database, workspace_id: str, keys: list[str] | None = None,
+                      encryption_key: str | None = None) -> dict[str, str]:
+    """Decrypt credentials only for internal delivery to an authenticated runner."""
     if keys:
         placeholders = ",".join("?" for _ in keys)
         rows = await db.query(
@@ -456,7 +540,20 @@ async def get_secrets(db: Database, workspace_id: str, keys: list[str] | None = 
     else:
         rows = await db.query("SELECT key, value FROM secrets WHERE workspace_id = ?",
                               (workspace_id,), ("key", "value"))
-    return {r["key"]: r["value"] for r in rows}
+    values: dict[str, str] = {}
+    for row in rows:
+        raw = str(row["value"] or "")
+        if raw.startswith("f1:"):
+            values[row["key"]] = decrypt(raw, encryption_key)
+            continue
+        # Migrate legacy plaintext rows at the first authenticated read. This
+        # keeps existing deployments recoverable while ensuring plaintext is
+        # not left in the database after the security upgrade.
+        values[row["key"]] = raw
+        encrypted = encrypt(raw, encryption_key)
+        await db.execute("UPDATE secrets SET value = ? WHERE workspace_id = ? AND key = ?",
+                         (encrypted, workspace_id, row["key"]))
+    return values
 
 
 # ---- rate limiting (cross-isolate via D1) -----------------------------------
@@ -466,24 +563,79 @@ async def rate_limit_allow(db: Database, client_key: str, limit: int,
     """Sliding-window counter persisted in D1 (shared across isolates)."""
     import time as _time
 
-    now = _time.monotonic()
+    now = _time.time()
     changed = await db.execute_changes(
-        "UPDATE rate_limits SET count = count + 1, window_start = ? WHERE client_key = ? AND window_start > ?",
-        (now, client_key, now - window_s))
-    if changed == 0:
-        # No active window: (re)insert with count=1, keeping the newest state.
+        "INSERT INTO rate_limits (client_key, window_start, count) VALUES (?, ?, 1) "
+        "ON CONFLICT(client_key) DO UPDATE SET "
+        "window_start = CASE WHEN rate_limits.window_start <= ? THEN excluded.window_start ELSE rate_limits.window_start END, "
+        "count = CASE WHEN rate_limits.window_start <= ? THEN 1 ELSE rate_limits.count + 1 END "
+        "WHERE rate_limits.window_start <= ? OR rate_limits.count < ?",
+        (client_key, now, now - window_s, now - window_s, now - window_s, limit),
+    )
+    return bool(changed)
+
+
+# ---- stage retry (reuse prior outputs) --------------------------------------
+
+async def get_latest_succeeded_output(db: Database, stage_id: str) -> str | None:
+    """Latest successful attempt output for a stage — the context a retry reuses."""
+    row = await db.query_one(
+        "SELECT output FROM attempts WHERE stage_id = ? AND status = 'succeeded' "
+        "ORDER BY attempt_number DESC LIMIT 1",
+        (stage_id,), ("output",))
+    return row["output"] if row else None
+
+
+async def get_stage_statuses(db: Database, plan_id: str) -> dict[str, str]:
+    rows = await db.query("SELECT id, status FROM stages WHERE plan_id = ?",
+                          (plan_id,), ("id", "status"))
+    return {r["id"]: r["status"] for r in rows}
+
+
+# ---- CI status (delivery webhook) -------------------------------------------
+
+_CI_COLS = ("task_id", "status", "url", "detail", "updated_at")
+
+
+async def set_ci_status(db: Database, task_id: str, status: str, url: str | None,
+                        detail: str | None) -> None:
+    existing = await db.query_one("SELECT task_id FROM ci_statuses WHERE task_id = ?",
+                                  (task_id,), ("task_id",))
+    if existing:
         await db.execute(
-            "INSERT INTO rate_limits (client_key, window_start, count) VALUES (?, ?, 1) "
-            "ON CONFLICT(client_key) DO UPDATE SET window_start = excluded.window_start, count = excluded.count",
-            (client_key, now))
-        row = await db.query_one("SELECT count FROM rate_limits WHERE client_key = ?",
-                                 (client_key,), ("count",))
-        current = int(row["count"]) if row else 1
+            "UPDATE ci_statuses SET status = ?, url = ?, detail = ?, updated_at = ? WHERE task_id = ?",
+            (status, url, detail, now_iso(), task_id))
     else:
-        row = await db.query_one("SELECT count FROM rate_limits WHERE client_key = ?",
-                                 (client_key,), ("count",))
-        current = int(row["count"]) if row else limit + 1
-    return current <= limit
+        await db.execute(
+            "INSERT INTO ci_statuses (task_id, status, url, detail, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (task_id, status, url, detail, now_iso()))
+
+
+async def get_ci_status(db: Database, task_id: str) -> dict | None:
+    return await db.query_one("SELECT * FROM ci_statuses WHERE task_id = ?",
+                              (task_id,), _CI_COLS)
+
+
+# ---- repo rule packs (per-repo custom verification) --------------------------
+
+_RULE_COLS = ("id", "workspace_id", "name", "kind", "spec", "enabled", "created_at")
+
+
+async def replace_repo_rules(db: Database, workspace_id: str, rules: list[dict]) -> None:
+    await db.execute("DELETE FROM repo_rules WHERE workspace_id = ?", (workspace_id,))
+    for r in rules:
+        await db.execute(
+            "INSERT INTO repo_rules (id, workspace_id, name, kind, spec, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uuid_str(), workspace_id, r["name"], r["kind"], r["spec"],
+             1 if r.get("enabled", True) else 0, now_iso()))
+
+
+async def get_repo_rules(db: Database, workspace_id: str) -> list[dict]:
+    rows = await db.query(
+        "SELECT * FROM repo_rules WHERE workspace_id = ? AND enabled = 1 ORDER BY created_at ASC",
+        (workspace_id,), _RULE_COLS)
+    return [dict(r) for r in rows]
 
 
 # ---- semantic index ---------------------------------------------------------

@@ -1,5 +1,8 @@
 """Delivery: create pull requests on GitHub (Phase 5)."""
 
+import re
+from urllib.parse import urlparse
+
 import httpx
 
 
@@ -25,7 +28,7 @@ async def create_pull_request(*, repo_url: str | None, token: str | None,
                          "Accept": "application/vnd.github+json",
                          "X-GitHub-Api-Version": "2022-11-28"})
         if resp.status_code >= 400:
-            return {"created": False, "error": f"github returned {resp.status_code}: {resp.text[:300]}"}
+            return {"created": False, "error": f"github returned {resp.status_code}"}
         data = resp.json()
         return {"created": True, "number": data.get("number"), "url": data.get("html_url")}
     except httpx.HTTPError as exc:
@@ -35,10 +38,13 @@ async def create_pull_request(*, repo_url: str | None, token: str | None,
 def _repo_slug(repo_url: str | None) -> str | None:
     if not repo_url:
         return None
-    cleaned = repo_url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
-    for prefix in ("https://github.com/", "http://github.com/"):
-        if cleaned.startswith(prefix):
-            return cleaned[len(prefix):]
-    return None
+    parsed = urlparse(repo_url.strip().rstrip("/"))
+    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.query or parsed.fragment:
+        return None
+    slug = parsed.path.strip("/")
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    parts = slug.split("/")
+    if len(parts) != 2 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part or "") for part in parts):
+        return None
+    return slug

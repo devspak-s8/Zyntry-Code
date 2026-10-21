@@ -10,6 +10,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def health(runtime: Runtime = Depends(get_runtime)) -> dict:
+    workflow = getattr(runtime.env, "EXECUTION_WORKFLOW", None) if runtime.env else None
     return {
         "status": "ok",
         "service": "zyntry-code",
@@ -17,5 +18,10 @@ async def health(runtime: Runtime = Depends(get_runtime)) -> dict:
         "providers": {
             "configured": sorted(available_providers(runtime)),
             "order": provider_order(runtime),
+        },
+        "workflow": {
+            # Cloud (Workers) durable execution: POST /tasks/{id}/execute?mode=workflow.
+            # Available only on the deployed Worker with the EXECUTION_WORKFLOW binding.
+            "available": workflow is not None,
         },
     }

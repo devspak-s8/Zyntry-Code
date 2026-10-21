@@ -11,13 +11,15 @@ generate code -> apply changes -> run checks -> inspect failures -> escalate.
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from domain import tools as tools_domain
 from runtime import Runtime, get_runtime
-from schemas import (DeliverRequest, McpServersRequest, SecretSetRequest,
-                     ToolApproveRequest, ToolDispatchRequest, ToolResultRequest,
-                     WorkspaceCreate, WorkspaceStateRequest)
+from security import require_runner_token
+from schemas import (DeliverRequest, McpServersRequest, RepoRulesRequest,
+                     SecretSetRequest, ToolApproveRequest, ToolDispatchRequest,
+                     ToolResultRequest, WorkspaceAttachRequest, WorkspaceCreate,
+                     WorkspaceStateRequest)
 import store
 import tools_service
 from util import now_iso, uuid_str
@@ -25,6 +27,11 @@ from util import now_iso, uuid_str
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 _LONG_POLL_SECONDS = 25.0
+_APPROVAL_REQUIRED_TOOLS = {
+    "fs.write", "fs.edit", "fs.delete", "git.commit", "git.push", "git.restore",
+    "github.pr", "command.start", "terminal.start", "terminal.input",
+    "terminal.output", "terminal.resize", "terminal.stop", "mcp.call",
+}
 
 
 def _check_local_token(request: Request, ws: dict) -> None:
@@ -59,7 +66,7 @@ async def create_workspace(body: WorkspaceCreate, runtime: Runtime = Depends(get
     if mcp_servers:
         await store.update_workspace(db, workspace_id, mcp_servers=store.json_dumps(mcp_servers))
 
-    result = store.workspace_dict(await store.get_workspace(db, workspace_id))
+    result = store.workspace_public_dict(await store.get_workspace(db, workspace_id))
     if runner_token:
         # Shown exactly once; store it in the local runner's settings.
         result["runner_token"] = runner_token
@@ -67,13 +74,38 @@ async def create_workspace(body: WorkspaceCreate, runtime: Runtime = Depends(get
 
 
 @router.get("")
-async def list_workspaces(runtime: Runtime = Depends(get_runtime),
+async def list_workspaces(request: Request, runtime: Runtime = Depends(get_runtime),
                           pending: bool = False, provider: str = "remote") -> dict:
     if pending:
         rows = await store.pending_workspaces(runtime.db, provider)
-        return {"workspaces": [store.workspace_dict(w) for w in rows]}
-    # all workspaces list endpoint is kept simple: only pending is exposed for runners
-    return {"workspaces": []}
+        if provider == "remote":
+            try:
+                require_runner_token(request, runtime)
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            return {"workspaces": [store.workspace_runner_dict(w) for w in rows]}
+        return {"workspaces": [store.workspace_public_dict(w) for w in rows]}
+    rows = await store.list_all_workspaces(runtime.db)
+    return {"workspaces": [store.workspace_public_dict(w) for w in rows]}
+
+
+@router.post("/{workspace_id}/attach")
+async def attach_workspace(workspace_id: str, body: WorkspaceAttachRequest,
+                           runtime: Runtime = Depends(get_runtime)) -> dict:
+    """Attach an existing workspace to a task.
+
+    Runner-owned (local) workspaces are created by the VS Code extension, which
+    holds the runner token; attaching here makes the executor dispatch file ops
+    and verification commands to that runner on the next execution.
+    """
+    ws = await store.get_workspace(runtime.db, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    task = await store.get_task(runtime.db, body.task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    await store.update_workspace(runtime.db, workspace_id, task_id=body.task_id)
+    return store.workspace_public_dict(await store.get_workspace(runtime.db, workspace_id))
 
 
 @router.post("/{workspace_id}/state")
@@ -83,10 +115,15 @@ async def update_workspace_state(workspace_id: str, body: WorkspaceStateRequest,
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    _check_local_token(request, ws)
+    try:
+        _check_local_token(request, ws)
+        if ws.get("provider") != "local":
+            require_runner_token(request, runtime)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     await store.update_workspace(runtime.db, workspace_id, **fields)
-    return store.workspace_dict(await store.get_workspace(runtime.db, workspace_id))
+    return store.workspace_public_dict(await store.get_workspace(runtime.db, workspace_id))
 
 
 # ---- secrets + delivery -----------------------------------------------------
@@ -97,7 +134,8 @@ async def set_workspace_secret(workspace_id: str, body: SecretSetRequest,
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    await store.set_secret(runtime.db, workspace_id, body.key, body.value)
+    await store.set_secret(runtime.db, workspace_id, body.key, body.value,
+                           runtime.get("SECRET_ENCRYPTION_KEY"))
     return {"workspace_id": workspace_id, "key": body.key, "stored": True}
 
 
@@ -107,8 +145,30 @@ async def list_workspace_secrets(workspace_id: str, runtime: Runtime = Depends(g
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    secrets = await store.get_secrets(runtime.db, workspace_id)
-    return {"workspace_id": workspace_id, "keys": sorted(secrets.keys())}
+    row = await runtime.db.query("SELECT key FROM secrets WHERE workspace_id = ? ORDER BY key",
+                                 (workspace_id,), ("key",))
+    return {"workspace_id": workspace_id, "keys": [item["key"] for item in row]}
+
+
+@router.get("/{workspace_id}/secrets/values")
+async def get_workspace_secret_values(workspace_id: str, request: Request,
+                                      runtime: Runtime = Depends(get_runtime),
+                                      keys: list[str] = Query(default=[])) -> dict:
+    """Runner-only secret delivery; values never appear in public serializers."""
+    ws = await store.get_workspace(runtime.db, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    try:
+        _check_local_token(request, ws)
+        if ws.get("provider") != "local":
+            require_runner_token(request, runtime)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if len(keys) > 20:
+        raise HTTPException(status_code=400, detail="too many secret keys")
+    values = await store.get_secrets(runtime.db, workspace_id, keys or None,
+                                     runtime.get("SECRET_ENCRYPTION_KEY"))
+    return {"workspace_id": workspace_id, "secrets": values}
 
 
 @router.put("/{workspace_id}/mcp-servers")
@@ -120,7 +180,8 @@ async def set_mcp_servers(workspace_id: str, body: McpServersRequest,
         raise HTTPException(status_code=404, detail="workspace not found")
     servers = [m.model_dump() for m in body.servers]
     await store.update_workspace(runtime.db, workspace_id, mcp_servers=store.json_dumps(servers))
-    return {"workspace_id": workspace_id, "mcp_servers": servers}
+    return {"workspace_id": workspace_id,
+            "mcp_servers": [{k: v for k, v in server.items() if k != "env"} for server in servers]}
 
 
 @router.get("/{workspace_id}/mcp-servers")
@@ -128,8 +189,36 @@ async def get_mcp_servers(workspace_id: str, runtime: Runtime = Depends(get_runt
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    ws = store.workspace_dict(ws)
+    ws = store.workspace_public_dict(ws)
     return {"workspace_id": workspace_id, "mcp_servers": ws.get("mcp_servers") or []}
+
+
+# ---- repo rule packs (per-repo custom verification) --------------------------
+
+@router.put("/{workspace_id}/rules")
+async def set_repo_rules(workspace_id: str, body: RepoRulesRequest,
+                         runtime: Runtime = Depends(get_runtime)) -> dict:
+    """Replace the workspace's repo rule pack.
+
+    - ``regex`` rules are scanned against every generated stage output;
+    - ``command`` rules run as extra verification commands (approval-gated);
+    - ``constitution`` rules are injected into every stage prompt as guardrails.
+    """
+    ws = await store.get_workspace(runtime.db, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    rules = [r.model_dump() for r in body.rules]
+    await store.replace_repo_rules(runtime.db, workspace_id, rules)
+    return {"workspace_id": workspace_id, "rules": rules}
+
+
+@router.get("/{workspace_id}/rules")
+async def get_repo_rules(workspace_id: str, runtime: Runtime = Depends(get_runtime)) -> dict:
+    ws = await store.get_workspace(runtime.db, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {"workspace_id": workspace_id,
+            "rules": await store.get_repo_rules(runtime.db, workspace_id)}
 
 
 @router.post("/{workspace_id}/deliver")
@@ -146,7 +235,6 @@ async def deliver_workspace(workspace_id: str, body: DeliverRequest,
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
 
-    secrets = await store.get_secrets(runtime.db, workspace_id)
     dispatched = []
 
     commit_id = await store.create_tool_request(
@@ -157,7 +245,7 @@ async def deliver_workspace(workspace_id: str, body: DeliverRequest,
     push_id = await store.create_tool_request(
         runtime.db, workspace_id=workspace_id, tool="git.push",
         params={"remote": ws.get("repo_url"), "branch": None,
-                "token": secrets.get("GIT_PUSH_TOKEN")},
+                "secret_keys": ["GIT_PUSH_TOKEN"]},
         dangerous=True, status="awaiting_approval")
     dispatched.append({"id": push_id, "tool": "git.push", "status": "awaiting_approval"})
 
@@ -166,7 +254,7 @@ async def deliver_workspace(workspace_id: str, body: DeliverRequest,
         params={"title": body.title, "body": body.body,
                 "base": body.base_branch or ws.get("branch") or "main",
                 "head": None,
-                "token": secrets.get("GITHUB_TOKEN")},
+                "secret_keys": ["GITHUB_TOKEN"]},
         dangerous=True, status="awaiting_approval")
     dispatched.append({"id": pr_id, "tool": "github.pr", "status": "awaiting_approval"})
 
@@ -179,7 +267,7 @@ async def get_workspace(workspace_id: str, runtime: Runtime = Depends(get_runtim
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    return store.workspace_dict(ws)
+    return store.workspace_public_dict(ws)
 
 
 @router.post("/{workspace_id}/stop")
@@ -207,7 +295,7 @@ async def list_tool_requests(workspace_id: str, runtime: Runtime = Depends(get_r
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
     rows = await store.list_tool_requests(runtime.db, workspace_id, status=status)
-    return {"tool_requests": [store.tool_request_dict(r) for r in rows]}
+    return {"tool_requests": [store.tool_request_public_dict(r) for r in rows]}
 
 
 @router.post("/{workspace_id}/tool-requests")
@@ -224,18 +312,23 @@ async def dispatch_tool_request(workspace_id: str, body: ToolDispatchRequest,
         raise HTTPException(status_code=404, detail="workspace not found")
     ws = store.workspace_dict(ws)
 
+    if body.tool not in tools_domain.TOOL_SPECS:
+        raise HTTPException(status_code=400, detail="unsupported tool")
+
     if body.tool == "command.run" or (body.command and body.tool == "command.run"):
         cmd = body.command or str(body.params.get("cmd", ""))
         req = await tools_service.dispatch_command(
             runtime.db, workspace_id=workspace_id, command=cmd,
             allowed_commands=ws.get("allowed_commands") or [])
-        return {"tool_request": req}
+        return {"tool_request": store.tool_request_public_dict(req)}
 
+    needs_approval = body.tool in _APPROVAL_REQUIRED_TOOLS or tools_domain.TOOL_SPECS[body.tool]["mutates"]
     request_id = await store.create_tool_request(
         runtime.db, workspace_id=workspace_id, tool=body.tool,
         params={**body.params, **({"cmd": body.command} if body.command else {})},
-        status="queued")
-    return {"tool_request": store.tool_request_dict(await store.get_tool_request(runtime.db, request_id))}
+        dangerous=needs_approval,
+        status="awaiting_approval" if needs_approval else "queued")
+    return {"tool_request": store.tool_request_public_dict(await store.get_tool_request(runtime.db, request_id))}
 
 
 @router.get("/{workspace_id}/tool-requests/next")
@@ -245,7 +338,12 @@ async def next_tool_request(workspace_id: str, request: Request,
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    _check_local_token(request, ws)
+    try:
+        _check_local_token(request, ws)
+        if ws.get("provider") != "local":
+            require_runner_token(request, runtime)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if ws["status"] == "stopped":
         raise HTTPException(status_code=409, detail="workspace is stopped")
 
@@ -259,6 +357,18 @@ async def next_tool_request(workspace_id: str, request: Request,
     while True:
         claimed = await store.next_queued_tool_request(runtime.db, workspace_id, runner_id)
         if claimed:
+            params = claimed.get("params") or {}
+            secret_keys = params.get("secret_keys") or []
+            if secret_keys:
+                secrets = await store.get_secrets(
+                    runtime.db, workspace_id, secret_keys,
+                    runtime.get("SECRET_ENCRYPTION_KEY"))
+                params = {key: value for key, value in params.items() if key != "secret_keys"}
+                if "GIT_PUSH_TOKEN" in secrets:
+                    params["token"] = secrets["GIT_PUSH_TOKEN"]
+                if "GITHUB_TOKEN" in secrets:
+                    params["token"] = secrets["GITHUB_TOKEN"]
+                claimed["params"] = params
             return {"tool_request": claimed}
         if asyncio.get_event_loop().time() >= deadline:
             return {"tool_request": None}
@@ -271,16 +381,24 @@ async def submit_tool_result(workspace_id: str, request_id: str, body: ToolResul
     ws = await store.get_workspace(runtime.db, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    _check_local_token(request, ws)
+    try:
+        _check_local_token(request, ws)
+        if ws.get("provider") != "local":
+            require_runner_token(request, runtime)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     req = await store.get_tool_request(runtime.db, request_id)
     if req is None or req["workspace_id"] != workspace_id:
         raise HTTPException(status_code=404, detail="tool request not found in this workspace")
 
+    secret_values = await store.get_secrets(
+        runtime.db, workspace_id, encryption_key=runtime.get("SECRET_ENCRYPTION_KEY"))
     updated = await tools_service.submit_tool_result(
-        runtime.db, request_id=request_id, status=body.status, result=body.result)
+        runtime.db, request_id=request_id, status=body.status, result=body.result,
+        redact_values=list(secret_values.values()))
     if updated is None:
         raise HTTPException(status_code=404, detail="tool request not found")
-    return {"tool_request": updated}
+    return {"tool_request": store.tool_request_public_dict(await store.get_tool_request(runtime.db, request_id))}
 
 
 @router.post("/{workspace_id}/tool-requests/{request_id}/approve")

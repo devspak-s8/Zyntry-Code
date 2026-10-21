@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -19,5 +20,20 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # Test-only values. ALLOW_INSECURE_LOCAL only disables auth when the
+      # runtime has no Workers env (tests), so production is unaffected.
+      # SECRET_ENCRYPTION_KEY here is a throwaway TEST key, never the
+      # production secret.
       - name: Run the test suite
-        run: uv run pytest -q
+        run: |
+          set +e
+          timeout 15m uv run pytest -q --timeout 90
+          code=$?
+          # Belt-and-braces: a leaked test child must never hold the job open.
+          pkill -f _fake_mcp_server 2>/dev/null || true
+          pkill -f "http.server" 2>/dev/null || true
+          exit $code
+        env:
+          ALLOW_INSECURE_LOCAL: "true"
+          SECRET_ENCRYPTION_KEY: "GTa-rDhZEDfjibHljnACYQ0Ubc8lslIGEkUSbOEG8TY="
+          RUNNER_TOKEN: "ci-test-runner-token"

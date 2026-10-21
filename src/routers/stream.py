@@ -48,7 +48,7 @@ def parse_sse_chunk(buffer: str) -> tuple[list[dict], str]:
 async def execute_stream(task_id: str, runtime: Runtime = Depends(get_runtime)) -> StreamingResponse:
     from executor import execute_task
 
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
     async def on_event(event: dict) -> None:
         await queue.put(event)
@@ -58,20 +58,28 @@ async def execute_stream(task_id: str, runtime: Runtime = Depends(get_runtime)) 
             summary = await execute_task(runtime, task_id, on_event=on_event)
             await queue.put({"type": "done", "summary": summary})
         except ValueError as exc:
-            await queue.put({"type": "error", "detail": str(exc), "status": 404})
+            await queue.put({"type": "error", "detail": "invalid task request", "status": 404})
         except PermissionError as exc:
-            await queue.put({"type": "error", "detail": str(exc), "status": 409})
+            await queue.put({"type": "error", "detail": "task cannot be executed", "status": 409})
         except Exception as exc:  # noqa: BLE001
-            await queue.put({"type": "error", "detail": str(exc), "status": 500})
+            await queue.put({"type": "error", "detail": "execution failed", "status": 500})
 
-    asyncio.create_task(run_execution())
+    execution_task = asyncio.create_task(run_execution())
 
     async def event_stream():
-        while True:
-            event = await queue.get()
-            yield format_sse(event)
-            if event["type"] in ("done", "error"):
-                return
+        try:
+            while True:
+                event = await queue.get()
+                yield format_sse(event)
+                if event["type"] in ("done", "error"):
+                    return
+        finally:
+            if not execution_task.done():
+                execution_task.cancel()
+            try:
+                await execution_task
+            except asyncio.CancelledError:
+                pass
 
     return StreamingResponse(
         event_stream(),

@@ -39,5 +39,8 @@ async def get_verification_reports(execution_id: str, stage_id: str,
     execution = await store.get_execution(runtime.db, execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="execution not found")
+    stage = await store.get_stage(runtime.db, stage_id)
+    if stage is None or stage["plan_id"] != execution["plan_id"]:
+        raise HTTPException(status_code=404, detail="stage not found in this execution")
     reports = await store.get_verification_reports(runtime.db, stage_id)
     return {"reports": reports}

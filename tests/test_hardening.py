@@ -253,6 +253,49 @@ def test_budget_caps_output_tokens():
     assert _budget_max_tokens(ctx, free) is None
 
 
+# ---- evidence-driven routing / full stage projection -------------------------
+
+def test_task_specific_reliability_can_override_sticker_price():
+    """A cheap model with a bad record on this stage kind must lose to a
+    pricier model that is actually reliable — task-specific evidence, not a
+    global score."""
+    from domain.routing import select_model
+
+    cheap = ModelSpec("cheap", "fake", "Cheap", 2, 128_000, 1.0, 1.0, _CAPS)
+    premium = ModelSpec("premium", "fake", "Premium", 4, 128_000, 5.0, 5.0, _CAPS)
+    stats = {"cheap": {"attempts": 20, "successes": 2, "failures": 18}}
+    global_stats = {
+        "cheap": {"attempts": 20, "successes": 2},
+        "premium": {"attempts": 0, "successes": 0},
+    }
+
+    selected, _, reasoning = select_model(
+        "implement", "low", {"fake"}, stats=stats, global_stats=global_stats,
+        catalog=[cheap, premium])
+
+    assert selected is premium
+    assert reasoning["evidence_adjusted"] is True
+    assert reasoning["reliability_scope"] == "global"  # premium only has the prior
+
+
+def test_budget_projection_includes_retries_and_verification():
+    from domain.escalation import (
+        PROJECTION_INCLUDES,
+        attempt_cost,
+        projected_stage_cost,
+        verification_cost,
+    )
+
+    model = _fake_model(cost=1.0)
+    one = projected_stage_cost(model, 1000, 1)
+
+    # One attempt includes its verification allowance.
+    assert one == pytest.approx(attempt_cost(model, 1000, 4096) + verification_cost(model))
+    # Two attempts include a second, larger input context plus verification.
+    assert projected_stage_cost(model, 1000, 2) > 2 * one
+    assert set(PROJECTION_INCLUDES) == {"input_context", "model_output", "retries", "verification"}
+
+
 # ---- secrets / delivery / token auth -----------------------------------------
 
 def test_secrets_stored_but_values_never_returned(runtime):
@@ -268,6 +311,54 @@ def test_secrets_stored_but_values_never_returned(runtime):
     assert listing.status_code == 200
     assert listing.json()["keys"] == ["GITHUB_TOKEN"]
     assert "ghp_supersecret" not in listing.text
+
+
+def test_secrets_are_encrypted_and_legacy_rows_migrate(runtime):
+    ws = asyncio.run(store.create_workspace(
+        runtime.db, workspace_id="secret-ws", task_id=None, repo_url=None,
+        branch=None, provider="remote", commands={}, env={}, allowed_commands=[],
+        auto_commit=False, timeout_seconds=60))
+    asyncio.run(store.set_secret(runtime.db, "secret-ws", "API_KEY", "top-secret",
+                                 runtime.get("SECRET_ENCRYPTION_KEY")))
+    raw = asyncio.run(runtime.db.query_one(
+        "SELECT value FROM secrets WHERE workspace_id = ? AND key = ?",
+        ("secret-ws", "API_KEY"), ("value",)))
+    assert raw and raw["value"].startswith("f1:")
+    assert "top-secret" not in raw["value"]
+
+    # Existing deployments may contain pre-upgrade plaintext rows. The first
+    # authenticated read encrypts them in place and returns the value only to
+    # the internal runner path.
+    asyncio.run(runtime.db.execute(
+        "INSERT INTO secrets (id, workspace_id, key, value, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("legacy-secret", "secret-ws", "LEGACY", "legacy-value", "now")))
+    values = asyncio.run(store.get_secrets(
+        runtime.db, "secret-ws", ["LEGACY"], runtime.get("SECRET_ENCRYPTION_KEY")))
+    migrated = asyncio.run(runtime.db.query_one(
+        "SELECT value FROM secrets WHERE workspace_id = ? AND key = ?",
+        ("secret-ws", "LEGACY"), ("value",)))
+    assert values == {"LEGACY": "legacy-value"}
+    assert migrated and migrated["value"].startswith("f1:")
+
+
+def test_public_workspace_and_tool_dispatch_do_not_bypass_policy(runtime):
+    client = TestClient(app)
+    ws = client.post("/workspaces", json={
+        "provider": "remote", "env": {"PRIVATE_KEY": "never-return"},
+        "mcp_servers": [{"name": "srv", "transport": "stdio", "command": "python",
+                          "env": {"TOKEN": "mcp-secret"}}],
+    }).json()
+    assert "env" not in ws and "runner_token" not in ws
+    assert "env" not in ws["mcp_servers"][0]
+
+    dispatched = client.post(f"/workspaces/{ws['id']}/tool-requests", json={
+        "tool": "git.push", "params": {"remote": "https://github.com/o/r.git"}})
+    assert dispatched.status_code == 200
+    assert dispatched.json()["tool_request"]["status"] == "awaiting_approval"
+
+    unsupported = client.post(f"/workspaces/{ws['id']}/tool-requests", json={
+        "tool": "database.drop", "params": {}})
+    assert unsupported.status_code == 400
 
 
 def test_deliver_attaches_secrets_only_to_tool_requests(runtime):
@@ -287,10 +378,13 @@ def test_deliver_attaches_secrets_only_to_tool_requests(runtime):
     assert by_tool["git.commit"]["status"] == "queued"
     assert by_tool["git.push"]["status"] == "awaiting_approval"
     assert by_tool["github.pr"]["status"] == "awaiting_approval"
-    # Secrets are attached ONLY to the tool request that needs them.
+    # Public tool-request responses contain references only, never credential values.
     assert by_tool["git.commit"]["params"].get("token") is None
-    assert by_tool["git.push"]["params"]["token"] == "push_secret"
-    assert by_tool["github.pr"]["params"]["token"] == "ghp_secret"
+    assert by_tool["git.push"]["params"] == {
+        "remote": "https://github.com/o/r.git", "branch": None,
+        "secret_keys": ["GIT_PUSH_TOKEN"]}
+    assert by_tool["github.pr"]["params"]["secret_keys"] == ["GITHUB_TOKEN"]
+    assert "push_secret" not in r.text and "ghp_secret" not in r.text
 
 
 def test_local_workspace_requires_runner_token(runtime):

@@ -5,9 +5,10 @@ description = "Zyntry Code - Adaptive AI Engineering Agent backend (FastAPI on C
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
-    "httpx>=0.28.0",
-    "pydantic>=2.7",
+    "fastapi==0.143.3",
+    "httpx==0.28.1",
+    "pydantic==2.14.1",
+    "cryptography==47.0.0",
 ]
 
 [build-system]
@@ -21,7 +22,8 @@ package-dir = { "" = "src", "execworker" = "execworker" }
 packages = ["execworker", "domain", "providers", "routers"]
 py-modules = [
     "agent", "app", "db", "executor", "metrics", "planner", "reporter",
-    "runtime", "schemas", "security", "store", "tools_service", "util", "worker",
+    "runtime", "schemas", "security", "secret_crypto", "semantic", "store", "tools_service",
+    "util", "worker",
 ]
 
 [dependency-groups]
@@ -30,6 +32,7 @@ dev = [
     "workers-runtime-sdk",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
     "uvicorn>=0.30",
 ]
 

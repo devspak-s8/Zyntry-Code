@@ -66,6 +66,32 @@ def required_capabilities(kind: str) -> set[Capability]:
     return STAGE_CAPABILITIES.get(kind, {Capability.CODE})
 
 
+# Bayesian shrinkage: a stage-specific record is trusted more as it accumulates
+# attempts, but never fully overrides the model's global prior. This turns the
+# evidence layer into a *task-specific reliability estimate* instead of one
+# global success score.
+PRIOR_STRENGTH = 4.0
+DEFAULT_RELIABILITY = 0.6
+MIN_RELIABILITY = 0.1
+
+
+def _reliability(row: dict | None, global_row: dict | None) -> tuple[float, str]:
+    """Reliability estimate for (model, stage kind, risk), shrunk toward the
+    model's global success rate. Returns ``(estimate, evidence_scope)``."""
+    global_attempts = int((global_row or {}).get("attempts") or 0)
+    global_rate = (
+        float(global_row.get("successes") or 0) / global_attempts
+        if global_attempts > 0
+        else DEFAULT_RELIABILITY
+    )
+    attempts = int((row or {}).get("attempts") or 0)
+    if attempts == 0:
+        return global_rate, "global"
+    successes = float((row or {}).get("successes") or 0)
+    estimate = (successes + PRIOR_STRENGTH * global_rate) / (attempts + PRIOR_STRENGTH)
+    return estimate, "stage+risk"
+
+
 def select_model(
     kind: str,
     risk: str,
@@ -74,13 +100,21 @@ def select_model(
     preferred_provider: str | None = None,
     catalog: list[ModelSpec] | None = None,
     stats: dict[str, dict] | None = None,
+    global_stats: dict[str, dict] | None = None,
+    tier_override: int | None = None,
     preferred_model: str | None = None,
 ) -> tuple[ModelSpec | None, list[ModelSpec], dict]:
     """Return ``(selected, candidates, reasoning)`` for a single stage.
 
-    ``stats`` is the evidence layer: {model_id: routing_stats row}. Models with
-    a poor success record get an effective-cost penalty so that routing improves
-    over time instead of relying purely on static pricing.
+    ``stats`` is the evidence layer for this exact (stage kind, risk) pair.
+    ``global_stats`` is the model's record across all stage kinds and is used
+    only as a Bayesian prior when the task-specific record is thin. The routing
+    cost is divided by the reliability estimate, so a model that historically
+    fails this kind of stage has a higher expected cost than its sticker price.
+
+    ``tier_override`` forces the minimum tier regardless of kind/risk:
+    - ``1``  → allow the fastest models that still have the required capabilities
+    - ``>=4`` → require reasoning-tier models (quality mode / deep reasoning)
 
     ``preferred_model`` pins the model exactly (the dashboard's free-model
     picker sets it via task constraints). When the pinned model is unavailable
@@ -90,8 +124,9 @@ def select_model(
     catalog = catalog or MODELS
     provider_order = provider_order or []
     stats = stats or {}
+    global_stats = global_stats or {}
 
-    min_tier = required_tier(kind, risk)
+    min_tier = tier_override if tier_override is not None else required_tier(kind, risk)
     caps = required_capabilities(kind)
 
     def provider_rank(m: ModelSpec) -> int:
@@ -99,18 +134,18 @@ def select_model(
             return provider_order.index(m.provider)
         return len(provider_order) + 1
 
-    def failure_penalty(m: ModelSpec) -> float:
-        s = stats.get(m.id)
-        if not s or not s.get("attempts"):
-            return 0.0
-        return (s.get("failures", 0) / s["attempts"]) * 2.0  # up to 2x cost
+    def reliability(m: ModelSpec) -> tuple[float, str]:
+        return _reliability(stats.get(m.id), global_stats.get(m.id))
 
     def effective_cost(m: ModelSpec) -> float:
-        return (m.cost_in + m.cost_out) * (1.0 + failure_penalty(m))
+        estimate, _ = reliability(m)
+        return (m.cost_in + m.cost_out) / max(estimate, MIN_RELIABILITY)
 
     needed = {str(c) for c in caps}
 
-    exact: list[ModelSpec] = []
+    # Exact pin (model picker): return the requested model when its provider is
+    # actually available — regardless of tier/capability filters. Otherwise
+    # fall through to normal routing.
     if preferred_model:
         exact = [
             m for m in catalog
@@ -122,7 +157,7 @@ def select_model(
                 "required_capabilities": sorted(c.value for c in caps),
                 "available_providers": sorted(available_providers),
                 "candidate_count": 1,
-                "evidence_adjusted": bool(stats),
+                "evidence_adjusted": bool(stats or global_stats),
                 "preferred_model": preferred_model,
                 "pinned": True,
             }
@@ -134,21 +169,24 @@ def select_model(
         and m.tier >= min_tier
         and needed <= {str(c) for c in m.capabilities}
         and (preferred_provider is None or m.provider == preferred_provider)
-        and (preferred_model is None or m.id == preferred_model)
     ]
 
     # Cheapest effective cost first, then provider preference, then lower tier (faster).
     candidates.sort(key=lambda m: (effective_cost(m), provider_rank(m), m.tier))
 
     selected = candidates[0] if candidates else None
+    selected_reliability, evidence_scope = (
+        reliability(selected) if selected is not None else (None, None)
+    )
     reasoning = {
         "min_tier": min_tier,
         "required_capabilities": sorted(c.value for c in caps),
         "available_providers": sorted(available_providers),
         "candidate_count": len(candidates),
-        "evidence_adjusted": bool(stats),
+        "evidence_adjusted": bool(stats or global_stats),
+        "reliability_scope": evidence_scope,
+        "selected_reliability": (
+            round(selected_reliability, 4) if selected_reliability is not None else None
+        ),
     }
-    if preferred_model and not exact:
-        reasoning["preferred_model"] = preferred_model
-        reasoning["preferred_model_unavailable"] = True
     return selected, candidates, reasoning

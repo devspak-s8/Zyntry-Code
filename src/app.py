@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from metrics import metrics
 from routers import (artifacts, completion, executions, health, ingest,
                      metrics as metrics_router, models, semantic, stream, tasks,
-                     verification, workers, workspaces)
+                     verification, webhooks, workers, workspaces)
 from security import security_middleware
 
 logging.basicConfig(level=logging.INFO)
@@ -92,10 +92,11 @@ app.include_router(artifacts.router)
 app.include_router(workspaces.router)
 app.include_router(workers.router)
 app.include_router(semantic.router)
+app.include_router(webhooks.router)
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled error: %s", exc)
     metrics.incr("http_errors_total")
-    return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(exc)})
+    return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "unexpected server error"})

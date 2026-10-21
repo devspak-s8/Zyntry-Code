@@ -180,9 +180,10 @@ def test_auth_middleware(runtime, monkeypatch):
 def test_no_token_required_when_unset(runtime, monkeypatch):
     _patch_tasks_planner(monkeypatch)
     monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOW_INSECURE_LOCAL", raising=False)
     client = TestClient(app)
     r = client.post("/tasks", json={"prompt": "do a thing"})
-    assert r.status_code == 200
+    assert r.status_code == 503
 
 
 # ---- repo ingestion ---------------------------------------------------------

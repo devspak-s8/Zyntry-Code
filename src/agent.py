@@ -105,6 +105,12 @@ async def run_agent_loop(db, workspace, emit, execution_id, stage, attempt_id,
 
         parsed = parse_agent_reply(reply.text)
         if parsed is None:
+            # Providers that do not implement the JSON tool protocol may still
+            # return a valid plain-text stage answer.  Preserve that answer and
+            # let the normal artifact/verification pipeline handle it instead
+            # of turning a protocol mismatch into a failed execution.
+            if not usage:
+                return reply.text, usage, None
             if is_last:
                 return reply.text, usage, "agent produced unparseable output"
             history.append({"role": "user", "content":

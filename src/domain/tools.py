@@ -5,7 +5,10 @@ in a workspace, which verification tool each command corresponds to, project
 command auto-detection, and the danger policy for commands.
 """
 
+import shlex
+
 from domain.enums import VerificationType
+from security import has_shell_metacharacters
 
 # tool name -> params schema description + whether it mutates state
 TOOL_SPECS: dict[str, dict] = {
@@ -20,6 +23,7 @@ TOOL_SPECS: dict[str, dict] = {
     "git.diff": {"params": [], "mutates": False},
     "git.commit": {"params": ["message"], "mutates": True},
     "git.push": {"params": ["remote", "branch"], "mutates": True},
+    "git.restore": {"params": ["paths"], "mutates": True},
     "github.pr": {"params": ["title", "body", "base", "head"], "mutates": True},
     "command.run": {"params": ["cmd", "cwd", "env"], "mutates": False},
     "command.start": {"params": ["cmd", "cwd", "env"], "mutates": False},
@@ -130,14 +134,28 @@ def detect_commands(repo_files: list[dict]) -> dict[str, dict]:
 
 def is_dangerous(command: str) -> bool:
     lowered = command.lower().strip()
-    return any(d in lowered for d in DANGEROUS_PATTERNS)
+    return has_shell_metacharacters(command) or any(d in lowered for d in DANGEROUS_PATTERNS)
 
 
 def is_allowed(command: str, allowed_commands: list[str]) -> bool:
     if not allowed_commands:
         allowed_commands = _DEFAULT_ALLOWED_PREFIXES
-    lowered = command.lower().strip()
-    return any(lowered.startswith(a.lower().strip()) for a in allowed_commands)
+    if has_shell_metacharacters(command):
+        return False
+    try:
+        command_tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not command_tokens:
+        return False
+    for allowed in allowed_commands:
+        try:
+            prefix_tokens = shlex.split(allowed, posix=True)
+        except ValueError:
+            continue
+        if prefix_tokens and [token.lower() for token in command_tokens[:len(prefix_tokens)]] == [token.lower() for token in prefix_tokens]:
+            return True
+    return False
 
 
 def command_key_for_verification(verification_type: str) -> str | None:

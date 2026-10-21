@@ -39,6 +39,17 @@ _PLANNER_SYSTEM = (
     "test -> verify (frontend), etc. Choose kinds appropriate to the task."
 )
 
+_PLAN_MODE_SYSTEM = (
+    "\n\n# Plan-only request\n"
+    "The developer selected Plan mode: they will review and edit this plan "
+    "before anything executes. Produce a complete, implementation-ready plan. "
+    "- Cover every file/module that must change and the approach for each.\n"
+    "- Include tests and review/verification stages; do not collapse them.\n"
+    "- Each stage description must state concrete work, files/contracts touched, "
+    "and its acceptance criteria (2-4 sentences).\n"
+    "- Order stages so each dependency is explicit."
+)
+
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -95,7 +106,9 @@ def parse_plan_json(text: str) -> dict | None:
 
 
 async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[dict],
-                    constraints: dict | None = None) -> dict:
+                    tier_override: int | None = None,
+                    detailed: bool = False,
+                    preferred_model: str | None = None) -> dict:
     """LLM-driven planning with refinement; raises RuntimeError on failure.
 
     The model proposes the plan as strict JSON; if validation fails, the
@@ -114,7 +127,7 @@ async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[d
 
     selected, _, _ = routing.select_model(
         StageKind.PLAN.value, risk, avail, provider_order(runtime),
-        preferred_model=((constraints or {}).get("model") or None))
+        tier_override=tier_override, preferred_model=preferred_model)
     if selected is None:
         raise RuntimeError(
             "No plan-capable model is available from the configured providers. "
@@ -132,6 +145,8 @@ async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[d
 
     user_prompt = f"# Task\n{prompt}\n\n{context}".strip()
 
+    system_prompt = _PLANNER_SYSTEM + (_PLAN_MODE_SYSTEM if detailed else "")
+
     for attempt in range(3):
         if attempt > 0:
             user_prompt += (
@@ -142,7 +157,8 @@ async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[d
             )
         try:
             result = await provider.complete(
-                selected.id, user_prompt, system=_PLANNER_SYSTEM, temperature=0.1, max_tokens=4000)
+                selected.id, user_prompt, system=system_prompt, temperature=0.1,
+                max_tokens=6000 if detailed else 4000)
         except Exception as exc:  # provider/network failure
             metrics.incr("planner_llm_error")
             raise RuntimeError(
@@ -193,15 +209,45 @@ async def create_and_plan(runtime: Runtime, *, prompt: str, repo: str | None,
 
     repo_files = await store.get_repo_files(db, task_id)
 
+    # Frontend mode policy: "ask" is read-only — drop every code-producing or
+    # repo-mutating stage so the task is pure analysis/Q&A.
+    policy_mode = str(merged_constraints.get("mode") or "agent").lower()
+    policy_routing = str(merged_constraints.get("routing_mode") or "auto").lower()
+    policy_deep = bool(merged_constraints.get("deep_reasoning"))
+    tier_override = None
+    if policy_routing == "quality" or policy_deep:
+        tier_override = max(routing.required_tier(StageKind.PLAN.value, risk), 4)
+    elif policy_routing == "fast":
+        tier_override = 1
+    policy_model = str(merged_constraints.get("model") or "").strip() or None
+
     # Planning is LLM-only: _llm_plan raises on failure (no providers, no
     # plan-capable model, provider error, or invalid JSON after refinement).
     # The API maps this to a 503 — loud failure, never a silent template.
     llm_plan = await _llm_plan(runtime, prompt, risk, repo_files,
-                               constraints=merged_constraints)
+                               tier_override=tier_override,
+                               detailed=policy_mode == "plan",
+                               preferred_model=policy_model)
     source = "llm"
     summary = llm_plan["summary"] or truncate(prompt, 200)
     draft_stages = llm_plan["stages"]
     metrics.incr("plans_source_llm")
+
+    if policy_mode == "ask":
+        ASK_DROP_KINDS = {
+            "implement", "implement_backend", "implement_frontend", "database",
+            "test", "integrate", "verify",
+        }
+        kept = [(i, s) for i, s in enumerate(draft_stages)
+                if s.get("kind") not in ASK_DROP_KINDS]
+        if kept:
+            old_to_new = {old: new for new, (old, _) in enumerate(kept)}
+            draft_stages = [s for _, s in kept]
+            for s in draft_stages:
+                s["dependencies"] = [old_to_new[d] for d in s.get("dependencies", [])
+                                     if d in old_to_new]
+            summary = (summary or "") + " [ask mode: read-only analysis, no code changes]"
+            metrics.incr("plans_ask_mode_filtered")
 
     plan_id = await store.create_plan(db, task_id, summary, source=source)
 

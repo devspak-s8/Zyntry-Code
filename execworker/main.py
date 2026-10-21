@@ -19,7 +19,8 @@ def _env(name: str, default: str | None = None) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Zyntry Code execution worker")
     parser.add_argument("--backend", default=_env("ZYNTRY_BACKEND_URL", "http://localhost:8787"))
-    parser.add_argument("--token", default=_env("ZYNTRY_TOKEN"))
+    parser.add_argument("--token", default=_env("ZYNTRY_RUNNER_TOKEN") or _env("ZYNTRY_TOKEN"))
+    parser.add_argument("--api-token", default=_env("ZYNTRY_TOKEN"))
     parser.add_argument("--id", dest="worker_id", default=_env("ZYNTRY_WORKER_ID") or f"worker-{uuid.uuid4().hex[:8]}")
     parser.add_argument("--name", default=_env("ZYNTRY_WORKER_NAME", "default"))
     parser.add_argument("--dir", dest="workspaces_dir",
@@ -42,7 +43,8 @@ def main() -> None:
         backend_url=args.backend, token=args.token, worker_id=args.worker_id,
         name=args.name, workspaces_dir=args.workspaces_dir,
         heartbeat_seconds=args.heartbeat, poll_seconds=args.poll,
-        cpu_limit=args.cpu_limit, mem_limit_mb=args.mem_limit_mb)
+        cpu_limit=args.cpu_limit, mem_limit_mb=args.mem_limit_mb,
+        api_token=args.api_token)
 
     async def run() -> None:
         if args.once:

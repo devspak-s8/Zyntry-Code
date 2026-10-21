@@ -16,6 +16,8 @@ import sys
 
 import httpx
 
+from execworker.security import has_shell_metacharacters, safe_child_env, validate_public_url
+
 _PROTOCOL_VERSION = "2025-03-26"
 
 
@@ -40,10 +42,13 @@ def _parse_response(line: str) -> dict:
 async def _stdio_rpc(server: dict, method: str, params: dict | None) -> dict:
     command = server.get("command") or "python"
     args = server.get("args") or []
+    if has_shell_metacharacters(command) or any(has_shell_metacharacters(str(arg)) for arg in args):
+        raise McpError("MCP command contains shell syntax")
+    if len(args) > 32:
+        raise McpError("too many MCP command arguments")
     if server.get("command") == "python":
         args = ["-m"] + args if not args else args
-    env = dict(os.environ)
-    env.update({str(k): str(v) for k, v in (server.get("env") or {}).items()})
+    env = safe_child_env(server.get("env") or {})
 
     proc = await asyncio.create_subprocess_exec(
         command, *args, stdin=asyncio.subprocess.PIPE,
@@ -59,6 +64,8 @@ async def _stdio_rpc(server: dict, method: str, params: dict | None) -> dict:
             writer.write((json.dumps(payload) + "\n").encode())
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), timeout=60.0)
+            if len(line) > 1_000_000:
+                raise McpError("MCP response is too large")
             if not line:
                 raise McpError("MCP server closed stdout")
             return _parse_response(line.decode())
@@ -99,13 +106,17 @@ async def _http_rpc(server: dict, method: str, params: dict | None) -> dict:
     url = server.get("url")
     if not url:
         raise McpError("http MCP server requires a url")
+    try:
+        validate_public_url(url)
+    except ValueError as exc:
+        raise McpError(str(exc)) from exc
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": _PROTOCOL_VERSION,
     }
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             init_resp = await client.post(url, json=_request("initialize", {
                 "protocolVersion": _PROTOCOL_VERSION, "capabilities": {},
                 "clientInfo": {"name": "zyntry-execworker", "version": "1.0"}}),
@@ -117,8 +128,10 @@ async def _http_rpc(server: dict, method: str, params: dict | None) -> dict:
                               headers=headers)
             resp = await client.post(url, json=_request(method, params, request_id=2),
                                      headers=headers)
+        if len(resp.content) > 2_000_000:
+            raise McpError("MCP response is too large")
         if resp.status_code >= 400:
-            raise McpError(f"mcp http error {resp.status_code}: {resp.text[:300]}")
+            raise McpError(f"mcp http error {resp.status_code}")
         ctype = resp.headers.get("content-type", "")
         if "text/event-stream" in ctype:
             events = _parse_sse_events(resp.text)

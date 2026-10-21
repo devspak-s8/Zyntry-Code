@@ -11,11 +11,28 @@ from execworker import commandops, delivery, fsops, gitops, mcp_client, security
 logger = logging.getLogger("zyntry-worker")
 
 
+def _redact_nested(value, secrets: list[str]):
+    if isinstance(value, str):
+        return security.redact(value, secrets)
+    if isinstance(value, list):
+        return [_redact_nested(item, secrets) for item in value[:500]]
+    if isinstance(value, dict):
+        return {key: _redact_nested(item, secrets) for key, item in value.items()}
+    return value
+
+
+def _workspace_secrets(workspace: dict) -> list[str]:
+    values = list((workspace.get("env") or {}).values())
+    for server in workspace.get("mcp_servers") or []:
+        values.extend((server.get("env") or {}).values())
+    return [str(value) for value in values if value]
+
+
 class Runner:
     def __init__(self, *, backend_url: str, token: str | None, worker_id: str,
                  name: str, workspaces_dir: str, heartbeat_seconds: int = 30,
                  poll_seconds: int = 5, cpu_limit: float | None = None,
-                 mem_limit_mb: int | None = None):
+                 mem_limit_mb: int | None = None, api_token: str | None = None):
         self.backend = backend_url.rstrip("/")
         self.token = token
         self.worker_id = worker_id
@@ -27,7 +44,9 @@ class Runner:
         # (POSIX only; ignored elsewhere). None/0 disables.
         self.cpu_limit = cpu_limit or None
         self.mem_limit_mb = mem_limit_mb or None
-        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._headers = {"Authorization": f"Bearer {api_token or token}"} if (api_token or token) else {}
+        if token and api_token and token != api_token:
+            self._headers["X-Runner-Token"] = token
         self._ws_cache: dict[str, dict] = {}
         self._running = True
         self._started_by_request: dict[str, str] = {}
@@ -113,8 +132,10 @@ class Runner:
             try:
                 status, result = await self._execute(req, ws, workdir)
                 executed_ref[0] += 1
+                result = _redact_nested(result, _workspace_secrets(ws))
             except Exception as exc:  # noqa: BLE001
-                status, result = "failed", {"error": str(exc)}
+                status, result = "failed", _redact_nested(
+                    {"error": str(exc)}, _workspace_secrets(ws))
             await self._post_result(workspace_id, req["id"], status, result)
 
         if ws.get("auto_commit"):
@@ -196,6 +217,9 @@ class Runner:
             return ("succeeded" if ok else "failed"), result
 
         if tool == "command.start":
+            cmd = params.get("cmd", "")
+            if not req.get("dangerous") and (not security.is_allowed(cmd, allowed) or security.is_dangerous(cmd)):
+                return "failed", {"error": "background command requires approval or an allowed safe command"}
             result = await commandops.start_command(workdir, params.get("cmd", ""),
                                                     env=ws.get("env"), secrets=secrets,
                                                     cpu_limit=self.cpu_limit,
@@ -232,19 +256,19 @@ class Runner:
             result = await terminal.start_session(
                 cwd=workdir, command=params.get("command"),
                 cols=int(params.get("cols", 120)), rows=int(params.get("rows", 40)),
-                env=ws.get("env"))
+                env=ws.get("env"), owner=ws.get("id"))
             return ("succeeded" if "session_id" in result else "failed"), result
 
         if tool == "terminal.input":
             try:
-                result = await terminal.write_input(params.get("session_id", ""), params.get("data", ""))
+                result = await terminal.write_input(params.get("session_id", ""), params.get("data", ""), owner=ws.get("id"))
                 return "succeeded", result
             except ValueError as exc:
                 return "failed", {"error": str(exc)}
 
         if tool == "terminal.output":
             try:
-                return "succeeded", await terminal.read_output(params.get("session_id", ""))
+                return "succeeded", await terminal.read_output(params.get("session_id", ""), owner=ws.get("id"))
             except ValueError as exc:
                 return "failed", {"error": str(exc)}
 
@@ -252,13 +276,13 @@ class Runner:
             try:
                 result = await terminal.resize(params.get("session_id", ""),
                                                int(params.get("cols", 120)),
-                                               int(params.get("rows", 40)))
+                                               int(params.get("rows", 40)), owner=ws.get("id"))
                 return "succeeded", result
             except ValueError as exc:
                 return "failed", {"error": str(exc)}
 
         if tool == "terminal.stop":
-            result = await terminal.stop_session(params.get("session_id", ""))
+            result = await terminal.stop_session(params.get("session_id", ""), owner=ws.get("id"))
             return ("succeeded" if "stopped" in result else "failed"), result
 
         return "failed", {"error": f"unsupported tool: {tool}"}

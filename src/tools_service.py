@@ -53,7 +53,8 @@ async def dispatch_command(db: Database, *, workspace_id: str, command: str,
 
 
 async def submit_tool_result(db: Database, *, request_id: str, status: str,
-                             result: dict | None = None) -> dict | None:
+                             result: dict | None = None,
+                             redact_values: list[str] | None = None) -> dict | None:
     """Record a runner's result for a tool request.
 
     Side effects:
@@ -65,6 +66,9 @@ async def submit_tool_result(db: Database, *, request_id: str, status: str,
     request = await store.get_tool_request(db, request_id)
     if request is None:
         return None
+    if request.get("status") not in ("dispatched", "running", "queued"):
+        return None
+    result = _bounded_result(result or {}, redact_values or [])
 
     terminal = status in ("succeeded", "failed", "timed_out", "cancelled")
     fields: dict[str, Any] = {
@@ -108,6 +112,31 @@ async def submit_tool_result(db: Database, *, request_id: str, status: str,
             output=f"{req['tool']} failed: {result.get('error') or result.get('stderr') or ''}"[:1000])
 
     return req
+
+
+def _bounded_result(value: dict, redact_values: list[str] | None = None) -> dict:
+    """Keep runner output bounded and remove credential-shaped fields."""
+    redact_values = [str(item) for item in (redact_values or []) if item]
+    def clean(item):
+        if isinstance(item, dict):
+            return {name: "[REDACTED]" if name.lower() in {
+                "token", "password", "secret", "api_key", "apikey",
+                "authorization", "private_key", "client_secret", "cookie",
+                "env"
+            } else clean(child) for name, child in item.items()}
+        if isinstance(item, list):
+            return [clean(child) for child in item[:500]]
+        if isinstance(item, str):
+            bounded = item[:20_000]
+            for secret in redact_values:
+                bounded = bounded.replace(secret, "[REDACTED]")
+            return bounded
+        return item
+
+    cleaned = clean(value)
+    if len(json_dumps(cleaned)) > 2_000_000:
+        return {"error": "runner result exceeded the maximum size"}
+    return cleaned
 
 
 async def dispatch_readonly_tool(db: Database, *, workspace_id: str, execution_id: str,

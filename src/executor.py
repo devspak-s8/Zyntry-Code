@@ -9,6 +9,7 @@ Runs synchronously within the request, or inside a Cloudflare Durable Workflow
 """
 
 import asyncio
+import re
 import time
 from typing import Any, Callable
 
@@ -99,6 +100,18 @@ def _stage_instruction(kind: str) -> str:
         return STAGE_INSTRUCTIONS[StageKind.IMPLEMENT]
 
 
+async def _load_repo_rules(ctx: "_RunContext") -> tuple[list[dict], list[str], list[str]]:
+    """Load the workspace's repo rule pack, split by kind:
+    regex rules, constitution rules, and command rules."""
+    if ctx.workspace is None:
+        return [], [], []
+    rules = await store.get_repo_rules(ctx.db, ctx.workspace["id"])
+    regexes = [r for r in rules if r["kind"] == "regex"]
+    constitution = [r["spec"] for r in rules if r["kind"] == "constitution"]
+    commands = [r["spec"] for r in rules if r["kind"] == "command"]
+    return regexes, constitution, commands
+
+
 def _budget_max_tokens(ctx: "_RunContext", model: ModelSpec) -> int | None:
     """Cap output tokens so the projected output cost can't exceed the remaining budget."""
     if ctx.budget is None or model.cost_out <= 0:
@@ -108,6 +121,19 @@ def _budget_max_tokens(ctx: "_RunContext", model: ModelSpec) -> int | None:
         return 64
     affordable = int(remaining / model.cost_out * 1_000_000)
     return max(64, min(affordable, 16384))
+
+
+def _project_stage_cost(ctx: "_RunContext", model: ModelSpec, prompt_tokens: int,
+                        required_caps: set[str], remaining_attempts: int) -> float:
+    """Full projected cost of finishing this stage, including retries,
+    escalation, growing input context, and verification operations."""
+    def next_model(current: ModelSpec) -> ModelSpec:
+        stronger, escalated = escalation.next_model(
+            current, required_caps, ctx.available_providers)
+        return stronger if escalated else current
+
+    return escalation.projected_stage_cost(
+        model, prompt_tokens, remaining_attempts, next_model=next_model)
 
 
 def _tool_callable(model: ModelSpec) -> bool:
@@ -136,11 +162,20 @@ def topo_levels(stages: list[dict]) -> list[list[dict]]:
 
 
 def _build_prompt(task: dict, stage: dict, prior_outputs: dict[str, str],
-                  repo_files: list[dict], failure_context: str | None = None) -> str:
+                  repo_files: list[dict], failure_context: str | None = None,
+                  steering: list[dict] | None = None) -> str:
     instruction = stage.get("description") or _stage_instruction(stage["kind"])
     parts = [f"# Task\n{task['prompt']}"]
     if task.get("repo"):
         parts.append(f"# Repository\n{task['repo']}")
+
+    # Mid-execution developer steering: folded into every subsequent stage
+    # so "wait, do X instead" actually changes what the agent does next.
+    if steering:
+        parts.append(
+            "# Developer steering (apply from now on)\n"
+            + "\n".join(f"- {s['message']}" for s in steering[-5:])
+        )
 
     # Repository context: full snippets for the understand stage, path index otherwise.
     if repo_files:
@@ -169,7 +204,8 @@ def _build_prompt(task: dict, stage: dict, prior_outputs: dict[str, str],
 
 
 async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallback | None = None,
-                       verify_wait_seconds: int = 0) -> dict:
+                       verify_wait_seconds: int = 0,
+                       retry_stage_ids: list[str] | None = None) -> dict:
     db = runtime.db
     task = await store.get_task(db, task_id)
     if task is None:
@@ -182,6 +218,31 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
         raise ValueError("task has no plan; plan it first")
 
     stages = [store.stage_dict(s) for s in await store.get_stages(db, plan["id"])]
+
+    # Retry: re-run the selected stages plus everything downstream of them,
+    # reusing the persisted outputs of already-succeeded stages as context.
+    retry_closure: set[str] | None = None
+    prior_outputs_preload: dict[str, str] = {}
+    pre_failed: set[str] = set()
+    if retry_stage_ids:
+        retry_closure = set(retry_stage_ids)
+        changed = True
+        while changed:
+            changed = False
+            for s in stages:
+                if s["id"] not in retry_closure and any(
+                        d in retry_closure for d in (s.get("dependencies") or [])):
+                    retry_closure.add(s["id"])
+                    changed = True
+        for s in stages:
+            if s["id"] in retry_closure:
+                await store.update_stage(db, s["id"], status=StageStatus.PENDING.value)
+            else:
+                if s["status"] in (StageStatus.FAILED.value, StageStatus.BLOCKED.value):
+                    pre_failed.add(s["id"])
+                out = await store.get_latest_succeeded_output(db, s["id"])
+                if out:
+                    prior_outputs_preload[s["id"]] = out
     repo_files = await store.get_repo_files(db, task_id)
     ws_row = await store.get_workspace_for_task(db, task_id)
     workspace = store.workspace_dict(ws_row) if ws_row else None
@@ -206,18 +267,46 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
     if verify_wait_seconds <= 0:
         verify_wait_seconds = int(constraints.get("verify_wait_seconds") or 0)
 
+    # Frontend execution policy: mode / routing_mode / deep_reasoning now
+    # actually change how the pipeline behaves.
+    policy_mode = str(constraints.get("mode") or "agent").lower()
+    policy_routing = str(constraints.get("routing_mode") or "auto").lower()
+    policy_deep = bool(constraints.get("deep_reasoning"))
+
     started = time.perf_counter()
 
     ctx = _RunContext(runtime=runtime, task=task, execution_id=execution_id,
                       available_providers=avail, provider_order=order,
                       max_attempts=max_attempts, budget=budget,
                       repo_files=repo_files, verify_wait_seconds=verify_wait_seconds,
-                      workspace=workspace, on_event=on_event)
+                      workspace=workspace, on_event=on_event,
+                      mode=policy_mode, routing_mode=policy_routing,
+                      deep_reasoning=policy_deep)
     await ctx.emit("execution_started", f"Executing {len(stages)} stages",
                    {"plan_id": plan["id"], "plan_source": plan.get("source")})
+    await ctx.emit("routing_policy", "Routing policy applied",
+                   {"mode": policy_mode, "routing_mode": policy_routing,
+                    "deep_reasoning": policy_deep})
 
-    failed_stages: set[str] = set()
-    outputs: dict[str, str] = {}
+    # Plan review: stages the developer excluded are skipped before execution.
+    # (A retry re-runs exactly the stages the developer picked, so exclusions
+    # do not apply to it.)
+    excluded_stage_ids: set[str] = set()
+    if retry_closure is None:
+        excluded_stage_ids = {str(x) for x in (constraints.get("exclude_stage_ids") or [])}
+    for s in stages:
+        if s["id"] in excluded_stage_ids:
+            await store.update_stage(db, s["id"], status=StageStatus.SKIPPED.value)
+            await ctx.emit("stage_skipped", "Skipped: excluded during plan review",
+                           {"excluded": True}, stage_id=s["id"])
+
+    if retry_closure is not None:
+        await ctx.emit("retry_started",
+                       f"Retrying {len(retry_closure)} stage(s); prior outputs of other stages are reused",
+                       {"stage_ids": sorted(retry_closure), "task_id": task_id})
+
+    failed_stages: set[str] = set(pre_failed)
+    outputs: dict[str, str] = dict(prior_outputs_preload)
 
     for level in topo_levels(stages):
         if ctx.budget_exceeded:
@@ -228,6 +317,10 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
 
         ready = []
         for s in level:
+            if s["id"] in excluded_stage_ids:
+                continue
+            if retry_closure is not None and s["id"] not in retry_closure:
+                continue  # already done in a previous execution — outputs preloaded
             deps = s.get("dependencies") or []
             if any(d in failed_stages for d in deps):
                 await store.update_stage(db, s["id"], status=StageStatus.BLOCKED.value)
@@ -248,7 +341,15 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
                                  escalation_count=ctx.escalation_count,
                                  total_cost=round(ctx.spend, 6), total_tokens=ctx.total_tokens)
 
-    success = not ctx.budget_exceeded and len(failed_stages) == 0
+    # Success is judged from the final stage table: a task is complete only when
+    # no stage is left failed, blocked, or never-run (retries included).
+    statuses = await store.get_stage_statuses(db, plan["id"])
+    success = (
+        not ctx.budget_exceeded
+        and not any(st in (StageStatus.FAILED.value, StageStatus.BLOCKED.value,
+                           StageStatus.PENDING.value)
+                    for st in statuses.values())
+    )
     final_status = ExecutionStatus.COMPLETED.value if success else ExecutionStatus.FAILED.value
     task_status = TaskStatus.COMPLETED.value if success else TaskStatus.FAILED.value
     await store.update_execution(db, execution_id, status=final_status, finished_at=now_iso())
@@ -273,7 +374,9 @@ class _RunContext:
     def __init__(self, *, runtime: Runtime, task: dict, execution_id: str,
                  available_providers: set[str], provider_order: list[str],
                  max_attempts: int, budget: float | None, repo_files: list[dict],
-                 verify_wait_seconds: int, workspace: dict | None, on_event: EventCallback | None):
+                 verify_wait_seconds: int, workspace: dict | None, on_event: EventCallback | None,
+                 mode: str = "agent", routing_mode: str = "auto",
+                 deep_reasoning: bool = False):
         self.runtime = runtime
         self.db = runtime.db
         self.task = task
@@ -287,6 +390,9 @@ class _RunContext:
         self.workspace = workspace
         self.workspace_timeout = workspace.get("timeout_seconds", 0) if workspace else 0
         self.on_event = on_event
+        self.mode = mode
+        self.routing_mode = routing_mode
+        self.deep_reasoning = deep_reasoning
         self.attempt_count = 0
         self.escalation_count = 0
         self.spend = 0.0
@@ -294,6 +400,19 @@ class _RunContext:
         self.budget_exceeded = False
         self.compact_cache: dict[str, dict] = {}
         self._providers: dict[str, Any] = {}
+
+    def tier_override(self, kind: str, risk: str) -> int | None:
+        """Map frontend routing policy to a minimum model tier.
+
+        - routing_mode=quality or deep_reasoning → reasoning tier (>=4)
+        - routing_mode=fast → allow the fastest capable models (tier >=1)
+        - anything else → adaptive default (kind/risk decide)
+        """
+        if self.routing_mode == "quality" or self.deep_reasoning:
+            return max(routing.required_tier(kind, risk), 4)
+        if self.routing_mode == "fast":
+            return 1
+        return None
 
     def provider_for(self, name: str):
         if name not in self._providers:
@@ -316,6 +435,24 @@ class _RunContext:
             except Exception:  # noqa: BLE001 - event delivery must never break execution
                 pass
 
+    async def emit_live(self, type_: str, message: str, data: dict | None = None,
+                        stage_id: str | None = None) -> None:
+        """Stream-only event: forwarded to live clients, never persisted.
+
+        Used for token-level streaming — writing every token to the event
+        store would flood the DB."""
+        if self.on_event:
+            try:
+                result = self.on_event({
+                    "type": type_, "message": message, "data": data or {},
+                    "stage_id": stage_id, "execution_id": self.execution_id,
+                    "created_at": now_iso(),
+                })
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001
+                pass
+
 
 async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str]) -> tuple[bool, str]:
     db = ctx.db
@@ -328,16 +465,20 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
     await ctx.emit("stage_started", f"Stage: {stage['title']}", {"kind": kind}, stage_id=stage["id"])
 
     stats = await store.get_routing_stats(db, kind, risk)
-    constraints = store.task_dict(ctx.task).get("constraints") or {}
+    global_stats = await store.get_global_routing_stats(db)
+    task_constraints = store.task_dict(ctx.task).get("constraints") or {}
+    preferred_model = str(task_constraints.get("model") or "").strip() or None
     selected, candidates, reasoning = routing.select_model(
         kind, risk, ctx.available_providers, ctx.provider_order, stats=stats,
-        preferred_model=(constraints.get("model") or None))
+        global_stats=global_stats, tier_override=ctx.tier_override(kind, risk),
+        preferred_model=preferred_model)
     if selected is None:
         metrics.incr("routing_no_eligible_model")
         await store.update_stage(db, stage["id"], status=StageStatus.FAILED.value)
         await ctx.emit("stage_failed",
                        "No eligible model: configure a provider with the required capabilities",
-                       {"required": reasoning["required_capabilities"]}, stage_id=stage["id"])
+                       {"required": reasoning["required_capabilities"], "kind": kind},
+                       stage_id=stage["id"])
         return False, ""
 
     metrics.incr("routing_decisions_total")
@@ -346,21 +487,48 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
 
     model: ModelSpec = selected
     provider = ctx.provider_for(model.provider)
+    # Mid-execution developer steering ("wait, do X instead") — folded into
+    # every prompt built from this point on.
+    steering = [
+        e for e in await store.get_events(db, ctx.execution_id, limit=500)
+        if e["type"] == "developer_message"
+    ]
     # Compact bulky prior-stage context before prompting (token cost stays flat).
     prior_ctx = await _compact_prior_outputs(ctx, stage, prior_outputs, model, provider)
-    prompt = _build_prompt(ctx.task, stage, prior_ctx, ctx.repo_files)
+    prompt = _build_prompt(ctx.task, stage, prior_ctx, ctx.repo_files, steering=steering)
+
+    # Repo rule packs: constitution rules join every stage prompt as guardrails;
+    # regex rules scan generated output; command rules run as extra verification.
+    regex_rules, constitution_rules, command_rules = await _load_repo_rules(ctx)
+    if constitution_rules:
+        prompt += "\n\n# Repository rules (must be respected)\n" + "\n".join(
+            f"- {r}" for r in constitution_rules)
+
+    # Auto-repair: the first verification failure is fed back to the SAME model
+    # once (repair with the check output) before escalating to a stronger model.
+    repair_used = False
 
     for attempt_number in range(1, ctx.max_attempts + 1):
-        # Budget guard: refuse to start an attempt whose projected cost would
-        # exceed the remaining budget.
-        projected = escalation.attempt_cost(model, escalation.estimate_tokens(prompt), 4096)
+        # Budget guard: reserve the *entire* projected cost of finishing this
+        # stage — remaining retries with growing input context, model output,
+        # escalation, and verification operations — before starting an attempt.
+        remaining_attempts = ctx.max_attempts - attempt_number + 1
+        projected = _project_stage_cost(
+            ctx, model, escalation.estimate_tokens(prompt), required_caps,
+            remaining_attempts)
         if ctx.budget is not None and ctx.spend + projected > ctx.budget:
             ctx.budget_exceeded = True
             metrics.incr("budget_exceeded_total")
             await store.update_stage(db, stage["id"], status=StageStatus.SKIPPED.value)
-            await ctx.emit("stage_skipped", "Skipped: execution budget would be exceeded",
-                           {"projected_usd": round(projected, 6), "spent_usd": round(ctx.spend, 6),
-                            "budget_usd": ctx.budget}, stage_id=stage["id"])
+            await ctx.emit(
+                "stage_skipped",
+                "Skipped: projected retry + verification cost would exceed budget",
+                {"projected_usd": round(projected, 6),
+                 "spent_usd": round(ctx.spend, 6),
+                 "budget_usd": ctx.budget,
+                 "projected_attempts": remaining_attempts,
+                 "includes": list(escalation.PROJECTION_INCLUDES)},
+                stage_id=stage["id"])
             return False, ""
 
         attempt_id = await store.create_attempt(
@@ -396,11 +564,27 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
                 input_prompt=json_dumps({"prompt": prompt[:1000],
                                          "agent_rounds": len(tool_usage)})[:3000])
         else:
-            result = await provider.complete(
-                model.id, prompt,
-                system=SYSTEM_PROMPT,
-                temperature=0.2 if attempt_number == 1 else 0.1,
-                max_tokens=max_tokens)
+            supports_streaming = getattr(provider, "supports_streaming", None)
+            if callable(supports_streaming) and supports_streaming():
+                # Token-level live streaming: forward each token to live
+                # clients (never persisted) so the chat narrates the model's
+                # actual output as it is generated.
+                async def on_token(text: str) -> None:
+                    await ctx.emit_live("token", text, {"text": text},
+                                        stage_id=stage["id"])
+
+                result = await provider.complete_stream(
+                    model.id, prompt,
+                    system=SYSTEM_PROMPT,
+                    temperature=0.2 if attempt_number == 1 else 0.1,
+                    max_tokens=max_tokens,
+                    on_token=on_token)
+            else:
+                result = await provider.complete(
+                    model.id, prompt,
+                    system=SYSTEM_PROMPT,
+                    temperature=0.2 if attempt_number == 1 else 0.1,
+                    max_tokens=max_tokens)
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         if result.error:
@@ -432,12 +616,12 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
             if result.error and attempt_number < ctx.max_attempts:
                 model, _ = escalation.next_model(model, required_caps, ctx.available_providers)
                 prompt = _next_prompt(ctx.task, stage, prior_ctx, ctx.repo_files,
-                                      [result.error], result.text)
+                                      [result.error], result.text, steering=steering)
                 continue
             if result.error:
                 await store.update_stage(db, stage["id"], status=StageStatus.FAILED.value)
                 await ctx.emit("stage_failed", f"Stage failed after {attempt_number} attempt(s)",
-                               {"model": model.id}, stage_id=stage["id"])
+                               {"model": model.id, "kind": kind}, stage_id=stage["id"])
                 return False, ""
 
         tokens_in = result.tokens_in or escalation.estimate_tokens(prompt)
@@ -448,10 +632,21 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
 
         outcome = verification.verify_stage(kind, stage.get("verification_types") or [], result.text)
 
+        # Repo rule-pack regex rules: deterministic scan of the generated output.
+        for rule in regex_rules:
+            try:
+                if re.search(rule["spec"], result.text or ""):
+                    outcome.status = "failed"
+                    outcome.failures.append(
+                        f"repo rule violation: {rule['name']} (pattern /{rule['spec']}/ matched)")
+            except re.error:
+                continue
+
         # Execution-environment verification: apply artifacts + run the stage's
         # checks in the workspace, then merge the real results.
         if ctx.workspace is not None and outcome.status != "failed":
-            await _dispatch_workspace_ops(ctx, stage, attempt_id, result.text)
+            await _dispatch_workspace_ops(ctx, stage, attempt_id, result.text,
+                                          extra_commands=command_rules)
             await tools_service.await_tool_results(
                 db, ctx.execution_id, timeout_seconds=ctx.workspace_timeout or 60.0)
             reports = await store.get_verification_reports(db, stage["id"], attempt_id=attempt_id)
@@ -482,17 +677,28 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
             await ctx.emit("verification_failed", f"Attempt {attempt_number} failed verification",
                            {"model": model.id, "failures": outcome.failures}, stage_id=stage["id"])
             if attempt_number < ctx.max_attempts:
+                if not repair_used and ctx.workspace is None:
+                    # One repair pass on the same model with the check output.
+                    repair_used = True
+                    metrics.incr("auto_repairs_total")
+                    await ctx.emit("stage_repairing",
+                                   "Verification failed — repairing with the check output",
+                                   {"failures": outcome.failures, "model": model.id},
+                                   stage_id=stage["id"])
+                    prompt = _next_prompt(ctx.task, stage, prior_ctx, ctx.repo_files,
+                                          outcome.failures, result.text, steering=steering)
+                    continue
                 model, escalated = escalation.next_model(model, required_caps, ctx.available_providers)
                 if escalated:
                     ctx.escalation_count += 1
                     metrics.incr("escalations_total")
                 prompt = _next_prompt(ctx.task, stage, prior_ctx, ctx.repo_files,
-                                      outcome.failures, result.text)
+                                      outcome.failures, result.text, steering=steering)
                 continue
             await store.update_stage(db, stage["id"], status=StageStatus.FAILED.value)
             await ctx.emit("stage_failed",
                            f"Stage failed verification after {attempt_number} attempt(s)",
-                           {"failures": outcome.failures}, stage_id=stage["id"])
+                           {"failures": outcome.failures, "kind": kind}, stage_id=stage["id"])
             return False, ""
 
         # passed or limited -> success (limited is recorded, never claimed as verified).
@@ -516,7 +722,7 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
                            {"limitations": outcome.limitations}, stage_id=stage["id"])
         await store.update_stage(db, stage["id"], status=StageStatus.SUCCEEDED.value)
         await ctx.emit("stage_succeeded", f"Stage succeeded with {model.id}",
-                       {"model": model.id, "attempt": attempt_number,
+                       {"model": model.id, "attempt": attempt_number, "kind": kind,
                         "verification": outcome.status, "limitations": outcome.limitations},
                        stage_id=stage["id"])
         return True, result.text
@@ -537,11 +743,13 @@ async def _wait_for_reports(ctx: _RunContext, stage_id: str, attempt_id: str,
             return
 
 
-async def _dispatch_workspace_ops(ctx: _RunContext, stage: dict, attempt_id: str, output: str) -> None:
+async def _dispatch_workspace_ops(ctx: _RunContext, stage: dict, attempt_id: str, output: str,
+                                  extra_commands: list[str] | None = None) -> None:
     """Send the execution adapter its work for this stage:
 
     1. apply every parsed artifact (fs.write);
-    2. run the stage's mapped verification commands (command.run -> reports).
+    2. run the stage's mapped verification commands (command.run -> reports);
+    3. run repo rule-pack command rules (custom per-repo verification).
 
     Artifacts are discovered in three ways, in order:
     - fenced blocks with file paths (```language:path),
@@ -614,6 +822,13 @@ async def _dispatch_workspace_ops(ctx: _RunContext, stage: dict, attempt_id: str
             db, workspace_id=ws["id"], execution_id=ctx.execution_id, stage_id=stage["id"],
             attempt_id=attempt_id, command_key=key, command=cmd, verify_as=vt,
             dangerous=bool(spec.get("dangerous")))
+
+    # Repo rule-pack commands: custom per-repo verification, approval-gated.
+    for idx, rule_cmd in enumerate(extra_commands or []):
+        await tools_service.dispatch_verification_command(
+            db, workspace_id=ws["id"], execution_id=ctx.execution_id, stage_id=stage["id"],
+            attempt_id=attempt_id, command_key=f"rule{idx}", command=rule_cmd,
+            verify_as=f"rule{idx}", dangerous=True)
     await ctx.emit("workspace_ops_dispatched", "Dispatched workspace operations",
                    {"stage": stage["id"]}, stage_id=stage["id"])
 
@@ -645,8 +860,10 @@ async def _stage_approval_gated(db, execution_id: str, stage_id: str) -> list[st
 
 
 def _next_prompt(task: dict, stage: dict, prior_outputs: dict[str, str], repo_files: list[dict],
-                 failure_reasons: list[str], prior_output: str | None) -> str:
+                 failure_reasons: list[str], prior_output: str | None,
+                 steering: list[dict] | None = None) -> str:
     return _build_prompt(
         task, stage, prior_outputs, repo_files,
         failure_context=escalation.build_failure_context(failure_reasons, prior_output),
+        steering=steering,
     )

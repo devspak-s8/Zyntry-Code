@@ -63,7 +63,7 @@ async def completion_stream(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    queue: asyncio.Queue[dict] = asyncio.Queue()
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
 
     async def on_token(text: str) -> None:
         await queue.put({"type": "token", "text": text, "token": text})
@@ -81,23 +81,28 @@ async def completion_stream(
             if result.error:
                 await queue.put({
                     "type": "error",
-                    "error": result.error,
-                    "detail": result.error,
+                    "error": "provider request failed",
+                    "detail": "provider request failed",
                     "text": result.text,
                 })
             else:
                 await queue.put({"type": "done", **_result_payload(result)})
-        except Exception as exc:  # noqa: BLE001 - keep the SSE stream terminable
-            await queue.put({"type": "error", "error": str(exc), "detail": str(exc)})
+        except Exception:  # noqa: BLE001 - keep the SSE stream terminable
+            await queue.put({"type": "error", "error": "provider request failed",
+                             "detail": "provider request failed"})
 
-    asyncio.create_task(run_completion())
+    task = asyncio.create_task(run_completion())
 
     async def event_stream():
-        while True:
-            event = await queue.get()
-            yield format_sse(event)
-            if event["type"] in ("done", "error"):
-                return
+        try:
+            while True:
+                event = await queue.get()
+                yield format_sse(event)
+                if event["type"] in ("done", "error"):
+                    return
+        finally:
+            if not task.done():
+                task.cancel()
 
     return StreamingResponse(
         event_stream(),

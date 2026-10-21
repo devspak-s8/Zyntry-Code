@@ -22,8 +22,8 @@ async def post_artifact(execution_id: str, stage_id: str, body: ArtifactRequest,
     if execution is None:
         raise HTTPException(status_code=404, detail="execution not found")
     stage = await store.get_stage(runtime.db, stage_id)
-    if stage is None:
-        raise HTTPException(status_code=404, detail="stage not found")
+    if stage is None or stage["plan_id"] != execution["plan_id"]:
+        raise HTTPException(status_code=404, detail="stage not found in this execution")
 
     artifact_id = await store.create_artifact(
         runtime.db, execution_id=execution_id, stage_id=stage_id, path=body.path,

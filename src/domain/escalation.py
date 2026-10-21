@@ -13,6 +13,52 @@ def attempt_cost(model: ModelSpec, tokens_in: int, tokens_out: int) -> float:
     return (tokens_in / 1_000_000) * model.cost_in + (tokens_out / 1_000_000) * model.cost_out
 
 
+# ---- full stage projection (budget guard) -----------------------------------
+# The budget guard must reserve the *entire* projected retry cost, not just the
+# first attempt: failure context grows the input on every retry, verification
+# consumes tokens of its own, and an escalation may switch to a pricier model.
+RETRY_CONTEXT_GROWTH = 0.35          # +35% input per retry (previous output + failures)
+RETRY_CONTEXT_FIXED_TOKENS = 600     # fixed failure-context overhead per retry
+VERIFICATION_INPUT_TOKENS = 900      # reserved for semantic verification
+VERIFICATION_OUTPUT_TOKENS = 300
+DEFAULT_OUTPUT_TOKENS = 4096
+
+#: Labels recorded on budget events so the UI can explain what was included.
+PROJECTION_INCLUDES = ("input_context", "model_output", "retries", "verification")
+
+
+def verification_cost(model: ModelSpec) -> float:
+    """Reserved cost for verification operations on one attempt."""
+    return attempt_cost(model, VERIFICATION_INPUT_TOKENS, VERIFICATION_OUTPUT_TOKENS)
+
+
+def projected_stage_cost(
+    model: ModelSpec,
+    tokens_in: int,
+    remaining_attempts: int,
+    next_model=None,
+    output_tokens: int = DEFAULT_OUTPUT_TOKENS,
+) -> float:
+    """Worst-case cost of finishing a stage from here.
+
+    Includes every remaining attempt, the growing input context on retries, the
+    verification allowance per attempt, and escalation to whichever model
+    ``next_model`` returns. Runner commands have no token price, so they add no
+    monetary cost; their verification allowance is still reserved.
+    """
+    total = 0.0
+    current = model
+    attempts = max(1, int(remaining_attempts))
+    for attempt in range(attempts):
+        growth = 1.0 + RETRY_CONTEXT_GROWTH * attempt
+        input_est = int(tokens_in * growth) + RETRY_CONTEXT_FIXED_TOKENS * attempt
+        total += attempt_cost(current, input_est, output_tokens)
+        total += verification_cost(current)
+        if next_model is not None and attempt < attempts - 1:
+            current = next_model(current)
+    return total
+
+
 def escalation_candidates(
     current: ModelSpec,
     required_caps: set[str],

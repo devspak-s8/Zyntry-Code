@@ -14,7 +14,7 @@ import signal
 import time
 import uuid
 
-from execworker.security import redact
+from execworker.security import parse_command, redact, safe_child_env
 
 # Background processes keyed by process id.
 _BACKGROUND: dict[str, asyncio.subprocess.Process] = {}
@@ -22,10 +22,7 @@ _BACKGROUND_LOGS: dict[str, str] = {}
 
 
 def _merged_env(extra: dict | None) -> dict:
-    env = dict(os.environ)
-    if extra:
-        env.update({k: str(v) for k, v in extra.items()})
-    return env
+    return safe_child_env(extra)
 
 
 def _rlimit_preexec(cpu_limit: float | None, mem_limit_mb: int | None):
@@ -41,7 +38,9 @@ def _rlimit_preexec(cpu_limit: float | None, mem_limit_mb: int | None):
             pass
         import resource  # POSIX-only; never imported on Windows
         if cpu_limit:
-            resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 1))
+            # RLIMIT values must be integers — a float here makes setrlimit
+            # raise inside the child, which then exits(1) before running.
+            resource.setrlimit(resource.RLIMIT_CPU, (int(cpu_limit), int(cpu_limit) + 1))
         if mem_limit_mb:
             limit = int(mem_limit_mb) * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
@@ -59,6 +58,19 @@ def _rlimits_info(enforced: bool, cpu_limit: float | None, mem_limit_mb: int | N
     return {"enforced": enforced, "cpu_seconds": cpu_limit, "mem_mb": mem_limit_mb}
 
 
+def _windows_builtin_result(argv: list[str], secrets: list[str]) -> dict | None:
+    """Handle the small set of shell builtins used by the portable worker tests.
+
+    ``echo`` is a builtin on Windows, so it is not available to
+    ``create_subprocess_exec`` as a standalone executable.  Handling this
+    harmless builtin directly keeps execution shell-free and portable.
+    """
+    if os.name == "nt" and argv and argv[0].lower() == "echo":
+        output = redact(" ".join(argv[1:]) + "\n", secrets)
+        return {"stdout": output, "stderr": "", "exit_code": 0}
+    return None
+
+
 async def run_command(cwd: str, cmd: str, env: dict | None = None,
                       timeout: float = 300.0, secrets: list[str] | None = None,
                       cpu_limit: float | None = None,
@@ -66,8 +78,19 @@ async def run_command(cwd: str, cmd: str, env: dict | None = None,
     started = time.monotonic()
     kwargs, enforced = _spawn_kwargs(cpu_limit, mem_limit_mb)
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd, env=_merged_env(env),
+        argv = parse_command(cmd)
+        builtin = _windows_builtin_result(argv, secrets or [])
+        if builtin is not None:
+            builtin.update({
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "timed_out": False,
+                "killed_by_signal": False,
+                "rlimits": _rlimits_info(False, cpu_limit, mem_limit_mb),
+                "error": None,
+            })
+            return builtin
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=cwd, env=_merged_env(env),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             **kwargs,
         )
@@ -94,10 +117,15 @@ async def run_command(cwd: str, cmd: str, env: dict | None = None,
         }
     except FileNotFoundError:
         return {"stdout": "", "stderr": f"command not found: {cmd}",
-                "exit_code": 127, "duration_ms": int((time.monotonic() - started) * 1000)}
+                "exit_code": 127, "duration_ms": int((time.monotonic() - started) * 1000),
+                "timed_out": False, "killed_by_signal": False,
+                "rlimits": _rlimits_info(enforced, cpu_limit, mem_limit_mb),
+                "error": f"command not found: {cmd}"}
     except Exception as exc:  # noqa: BLE001
         return {"stdout": "", "stderr": str(exc), "exit_code": -1,
                 "duration_ms": int((time.monotonic() - started) * 1000),
+                "timed_out": False, "killed_by_signal": False,
+                "rlimits": _rlimits_info(enforced, cpu_limit, mem_limit_mb),
                 "error": str(exc)}
 
 
@@ -119,21 +147,41 @@ async def start_command(cwd: str, cmd: str, env: dict | None = None,
     process_id = uuid.uuid4().hex[:12]
     log_path = os.path.join(cwd, ".zyntry-logs", f"{process_id}.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    log_fh = open(log_path, "w", encoding="utf-8")
     kwargs, enforced = _spawn_kwargs(cpu_limit, mem_limit_mb)
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd, env=_merged_env(env),
-            stdout=log_fh, stderr=log_fh,
+        proc = await asyncio.create_subprocess_exec(
+            *parse_command(cmd), cwd=cwd, env=_merged_env(env),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             **kwargs,
         )
     except Exception as exc:  # noqa: BLE001
-        log_fh.close()
         return {"error": str(exc)}
     _BACKGROUND[process_id] = proc
     _BACKGROUND_LOGS[process_id] = log_path
+    asyncio.create_task(_capture_background_log(proc, log_path, secrets or []))
     return {"process_id": process_id, "pid": proc.pid, "log": log_path,
             "rlimits": _rlimits_info(enforced, cpu_limit, mem_limit_mb)}
+
+
+async def _capture_background_log(proc: asyncio.subprocess.Process, path: str,
+                                  secrets: list[str], max_bytes: int = 2_000_000) -> None:
+    """Persist bounded, redacted output without exposing credentials on disk."""
+    written = 0
+    try:
+        with open(path, "w", encoding="utf-8") as log_fh:
+            while proc.stdout is not None:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                if written >= max_bytes:
+                    continue
+                text = redact(chunk.decode("utf-8", errors="replace"), secrets)
+                remaining = max_bytes - written
+                log_fh.write(text[:remaining])
+                log_fh.flush()
+                written += min(len(text), remaining)
+    except Exception:  # noqa: BLE001
+        return
 
 
 async def stop_command(process_id: str) -> dict:
@@ -154,4 +202,4 @@ async def command_logs(process_id: str, tail: int = 5000) -> dict:
         return {"error": f"no logs for process: {process_id}"}
     with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
         content = fh.read()
-    return {"log": content[-tail:]}
+    return {"log": content[-max(0, min(int(tail), 5000)): ]}
