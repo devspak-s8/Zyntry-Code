@@ -41,8 +41,6 @@ function baseUrl() {
 
 async function api(method, p, body, headers = {}) {
   const h = { "Content-Type": "application/json", ...headers };
-  const token = String(config().get("apiToken", ""));
-  if (token) h["Authorization"] = `Bearer ${token}`;
   const resp = await fetch(`${baseUrl()}${p}`, {
     method,
     headers: h,
@@ -173,12 +171,8 @@ async function streamTask() {
   if (!id) return;
   output.show();
   log(`streaming execution of task ${id}…`);
-  const token = String(config().get("apiToken", ""));
-  const headers = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const resp = await fetch(`${baseUrl()}/tasks/${id}/execute/stream`, {
     method: "POST",
-    headers,
   });
   if (!resp.ok) {
     vscode.window.showErrorMessage(`Zyntry: stream failed: HTTP ${resp.status}`);
@@ -539,6 +533,86 @@ async function executeTool(req, ws) {
 }
 
 // ---------------------------------------------------------------------------
+// extension bridge — the bundled dashboard (served by this loopback server)
+// can ask the extension to attach the open folder as a task's execution
+// workspace and start the local runner. The runner token never leaves this
+// process; the dashboard only ever sees the workspace record.
+// ---------------------------------------------------------------------------
+
+function detectCommands(root) {
+  const has = (f) => {
+    try {
+      return fs.existsSync(path.join(root, f));
+    } catch {
+      return false;
+    }
+  };
+  const commands = {};
+  if (has("package.json")) {
+    commands.test = { cmd: "npm test" };
+    commands.lint = { cmd: "npm run lint" };
+    commands.type_check = { cmd: "npx tsc --noEmit" };
+    commands.build = { cmd: "npm run build" };
+  } else if (has("pyproject.toml") || has("requirements.txt")) {
+    commands.test = { cmd: "pytest" };
+    commands.lint = { cmd: "ruff check ." };
+    commands.type_check = { cmd: "mypy ." };
+  } else if (has("Cargo.toml")) {
+    commands.test = { cmd: "cargo test" };
+    commands.build = { cmd: "cargo build" };
+  } else if (has("go.mod")) {
+    commands.test = { cmd: "go test ./..." };
+    commands.build = { cmd: "go build ./..." };
+  }
+  return commands;
+}
+
+async function bridgeCreateWorkspace(taskId) {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    throw new Error("no folder open in VS Code");
+  }
+  const body = { provider: "local", commands: detectCommands(folders[0].uri.fsPath) };
+  if (taskId) body.task_id = taskId;
+  const ws = await api("POST", "/workspaces", body);
+  if (ws.runner_token) workspaceTokens.set(ws.id, ws.runner_token);
+  log("bridge: workspace created", ws.id, "provider=local (runner token held locally)");
+  if (!runnerRunning) startLocalRunner();
+  return ws;
+}
+
+async function handleBridge(req, res, pathname) {
+  if (pathname === "/bridge/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ extension: true, port: dashboardPort }));
+    return true;
+  }
+  if (pathname === "/bridge/workspace" && req.method === "POST") {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      /* empty body is fine */
+    }
+    try {
+      const ws = await bridgeCreateWorkspace(body.task_id);
+      const safe = { ...ws };
+      delete safe.runner_token;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ workspace: safe }));
+    } catch (err) {
+      log("bridge: workspace failed:", err.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: err.message }));
+    }
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // dashboard — the bundled web UI, served on loopback and shown in a webview
 // ---------------------------------------------------------------------------
 
@@ -571,9 +645,10 @@ function dashboardRoot() {
 }
 
 function dashboardHandler(root) {
-  return (req, res) => {
+  return async (req, res) => {
     try {
       let rel = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+      if (await handleBridge(req, res, rel)) return;
       if (rel === "/" || rel === "") rel = "/index.html";
       const file = path.normalize(path.join(root, rel));
       if (file !== root && !file.startsWith(root + path.sep)) {
@@ -712,6 +787,17 @@ function activate(context) {
     vscode.window.registerWebviewViewProvider("zyntry.dashboard", new DashboardViewProvider()),
   );
   log("Zyntry Code extension activated. Backend:", baseUrl());
+  // Zero-config: the local runner comes up by itself, so workspace tool
+  // requests (file writes, commands, git) are served without any setup.
+  if (config().get("autoStartRunner", true)) {
+    setTimeout(() => {
+      try {
+        startLocalRunner();
+      } catch (err) {
+        log("auto-start runner failed:", err && err.message);
+      }
+    }, 3000);
+  }
 }
 
 function deactivate() {

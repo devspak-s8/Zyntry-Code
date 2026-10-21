@@ -15,6 +15,7 @@ import {
   isBackendConfigured,
   friendlyError,
   getProviderConfig,
+  connectWorkspaceViaBridge,
   mapPlanSteps,
   mapExecutionStages,
   mapVerificationChecks,
@@ -373,6 +374,18 @@ export const AppShell: React.FC = () => {
         planSteps: mapPlanSteps(created.plan.stages),
         state: created.requires_approval ? 'awaiting_approval' : 'working',
       });
+      // Zero-config agentic execution: when the dashboard runs inside the VS
+      // Code extension, attach the open folder as this task's workspace so the
+      // engine gets real file edits, terminal checks, and git delivery — no
+      // manual workspace setup. Silently skipped outside the extension.
+      if (!currentSession.backendWorkspaceId) {
+        try {
+          const bridgeWs = await connectWorkspaceViaBridge(created.task.id);
+          if (bridgeWs) updateCurrentSession({ backendWorkspaceId: bridgeWs.id });
+        } catch {
+          /* bridge optional — execution still works without a workspace */
+        }
+      }
       if (created.requires_approval) {
         setPendingApprovalTask(created.task.id);
         setShowApprovalDialog(true);

@@ -2,7 +2,7 @@
   "name": "zyntry-code",
   "displayName": "Zyntry Code",
   "description": "Run AI coding tasks in your open folder. Describe what you want in the sidebar; Zyntry plans, edits, and verifies. Free models included.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "ZyntryCode",
   "license": "MIT",
   "icon": "icon.png",
@@ -46,10 +46,10 @@
           "default": "https://code-api.zyntry.space",
           "description": "Zyntry Code service endpoint — ships pointed at the public deployment; set to http://localhost:8787 for local runs."
         },
-        "zyntry.apiToken": {
-          "type": "string",
-          "default": "",
-          "description": "Optional access credential for remote deployments (leave empty for local development)."
+        "zyntry.autoStartRunner": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local runner automatically when the extension activates, so file edits, terminal checks, and git delivery work without setup."
         },
         "zyntry.runnerPollSeconds": {
           "type": "number",

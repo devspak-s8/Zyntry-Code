@@ -383,6 +383,48 @@ export const api = {
 };
 
 // ---------------------------------------------------------------------------
+// Extension bridge (bundled dashboard only)
+//
+// When the dashboard is served by the VS Code extension's loopback server, the
+// extension exposes local endpoints that let the UI attach the open folder as
+// an execution workspace and start the local runner — zero setup. The runner
+// token never leaves the extension process.
+// ---------------------------------------------------------------------------
+
+const EXT_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+/** True when this dashboard is served by the VS Code extension's local server. */
+export async function extensionBridgeAvailable(): Promise<boolean> {
+  if (typeof location === 'undefined') return false;
+  if (location.protocol !== 'http:' || !EXT_HOSTS.has(location.hostname)) return false;
+  try {
+    const r = await fetch('/bridge/ping');
+    if (!r.ok) return false;
+    const data = (await r.json()) as { extension?: boolean };
+    return Boolean(data.extension);
+  } catch {
+    return false;
+  }
+}
+
+/** Ask the extension to attach the open folder as the task's execution workspace. */
+export async function connectWorkspaceViaBridge(taskId?: string): Promise<BackendWorkspace | null> {
+  if (!(await extensionBridgeAvailable())) return null;
+  const r = await fetch('/bridge/workspace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(taskId ? { task_id: taskId } : {}),
+  });
+  if (!r.ok) return null;
+  try {
+    const data = (await r.json()) as { workspace?: BackendWorkspace };
+    return data.workspace ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SSE stream parser (handles chunk boundaries)
 // ---------------------------------------------------------------------------
 
