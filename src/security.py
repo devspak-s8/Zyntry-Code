@@ -107,7 +107,11 @@ async def security_middleware(request: Request, call_next):
         token = runtime.get("API_TOKEN")
         header = request.headers.get("authorization", "")
         if not token:
-            if not insecure_local_allowed(runtime):
+            # The shipped product runs open (zero-config) by default. Self-
+            # hosted deployments can flip ZYNTRY_OPEN=0 to require the token.
+            if runtime.get_bool("ZYNTRY_OPEN", True):
+                pass
+            elif not insecure_local_allowed(runtime):
                 return JSONResponse(status_code=503, content={
                     "error": "auth_not_configured",
                     "detail": "API_TOKEN must be configured before serving protected routes",

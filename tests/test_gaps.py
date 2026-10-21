@@ -177,13 +177,25 @@ def test_auth_middleware(runtime, monkeypatch):
     assert r.status_code == 401
 
 
-def test_no_token_required_when_unset(runtime, monkeypatch):
+def test_no_token_required_when_open_mode_disabled(runtime, monkeypatch):
+    _patch_tasks_planner(monkeypatch)
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOW_INSECURE_LOCAL", raising=False)
+    # The shipped product defaults to ZYNTRY_OPEN=1 (serve without auth);
+    # deployments that want the strict posture opt out explicitly.
+    monkeypatch.setenv("ZYNTRY_OPEN", "0")
+    client = TestClient(app)
+    r = client.post("/tasks", json={"prompt": "do a thing"})
+    assert r.status_code == 503
+
+
+def test_open_by_default_serves_without_token(runtime, monkeypatch):
     _patch_tasks_planner(monkeypatch)
     monkeypatch.delenv("API_TOKEN", raising=False)
     monkeypatch.delenv("ALLOW_INSECURE_LOCAL", raising=False)
     client = TestClient(app)
     r = client.post("/tasks", json={"prompt": "do a thing"})
-    assert r.status_code == 503
+    assert r.status_code == 200
 
 
 # ---- repo ingestion ---------------------------------------------------------
