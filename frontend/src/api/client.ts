@@ -207,6 +207,51 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Translate raw service errors into one calm, human sentence (with the
+ * technical detail kept on a separate line for admins).
+ */
+export function friendlyError(err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err ?? 'unknown error');
+  const status = err instanceof ApiError ? err.status : 0;
+  const d = detail.toLowerCase();
+
+  const withDetail = (message: string) =>
+    `${message}\n\nDetails: ${detail.slice(0, 240)}`;
+
+  if (status === 0 || d.includes('backend not configured') || d.includes('fetch')) {
+    return 'I could not reach the Zyntry service. Check your connection and run the task again.';
+  }
+  if (status === 429 || d.includes('rate limit') || d.includes('rate_limited')) {
+    return 'The service is handling a lot of requests right now. Give it about a minute and run the task again.';
+  }
+  if (d.includes('no such model') || d.includes('5007')) {
+    return 'The model this task tried to use is not available on the service. Pick Auto in the composer model picker and run again.';
+  }
+  if (d.includes('budget') && (d.includes('exceed') || d.includes('cap'))) {
+    return 'This task hit its spending cap. Raise the task budget in Settings, then run it again.';
+  }
+  if (d.includes('planning is llm-only') || d.includes('llm planning failed')) {
+    return 'I could not finish planning this task — the model did not respond in a usable way this time. This usually works on retry; try running it again.';
+  }
+  if (d.includes('no eligible model') || d.includes('no plan-capable model')) {
+    return 'No model currently fits this task. Add an AI provider key from the composer model picker, or try again later.';
+  }
+  if (status === 401) {
+    return 'The service rejected this request. Remove any old saved credential from Settings and try again.';
+  }
+  if (status === 503) {
+    return 'The service is temporarily unavailable. Try again in a moment.';
+  }
+  if (status >= 500) {
+    return 'The service hit an unexpected error while working on this task. Try running it again.';
+  }
+  if (status === 409 || status === 404) {
+    return 'This task is no longer in a state I can continue from. Start a new task and describe what you need.';
+  }
+  return withDetail('Something went wrong while handling your task.');
+}
+
 async function request<T>(
   method: string,
   path: string,

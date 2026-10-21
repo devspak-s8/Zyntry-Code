@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { WorkspaceMode } from '../types';
-import { api } from '../api/client';
+import { api, getProviderConfig, ProviderConfig } from '../api/client';
 import { 
   ArrowUp,
   Square, 
@@ -14,6 +14,7 @@ import {
   Check, 
   FileCode,
   Cpu,
+  Lock,
   Plus,
   Mic,
   GitBranch,
@@ -32,10 +33,22 @@ interface ComposerProps {
   onAddProvider?: () => void;
 }
 
-interface FreeModelOption {
+interface ModelOption {
   id: string;
   display_name: string;
   provider: string;
+  costIn: number;
+  costOut: number;
+  available: boolean;
+}
+
+/** Does the caller's own saved provider key unlock this model's provider? */
+function keyUnlocks(model: ModelOption, cfg: ProviderConfig | null): boolean {
+  if (!cfg?.key) return false;
+  if (model.provider === 'workers_ai') return true; // edge inference needs no key
+  if (model.provider === 'openai') return cfg.provider === 'openai' || cfg.provider === 'openrouter';
+  if (model.provider === 'anthropic') return cfg.provider === 'anthropic';
+  return false;
 }
 
 const MODE_ITEMS: { id: WorkspaceMode; label: string; icon: React.ReactNode; desc: string }[] = [
@@ -83,7 +96,8 @@ export const Composer: React.FC<ComposerProps> = ({
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showQuickPrompts, setShowQuickPrompts] = useState(true);
-  const [freeModels, setFreeModels] = useState<FreeModelOption[]>([]);
+  const [freeModels, setFreeModels] = useState<ModelOption[]>([]);
+  const [premiumModels, setPremiumModels] = useState<ModelOption[]>([]);
   const [contextFiles] = useState<string[]>([]);
 
   // Interactive features
@@ -99,7 +113,7 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   }, [initialText]);
 
-  // Fetch the free model catalog for the model picker.
+  // Fetch the model catalog for the model picker (free + premium sections).
   useEffect(() => {
     let alive = true;
     api.models().then((res) => {
@@ -111,14 +125,16 @@ export const Composer: React.FC<ComposerProps> = ({
         available: boolean;
         cost: { in_per_1m: number; out_per_1m: number };
       }[]) ?? [];
-      const free = models.filter((m) =>
-        Number(m.cost?.in_per_1m ?? 0) === 0
-        && Number(m.cost?.out_per_1m ?? 0) === 0);
-      setFreeModels(free.map((m) => ({
+      const mapped: ModelOption[] = models.map((m) => ({
         id: m.id,
         display_name: m.display_name,
         provider: m.provider,
-      })));
+        costIn: Number(m.cost?.in_per_1m ?? 0),
+        costOut: Number(m.cost?.out_per_1m ?? 0),
+        available: Boolean(m.available),
+      }));
+      setFreeModels(mapped.filter((m) => m.costIn === 0 && m.costOut === 0));
+      setPremiumModels(mapped.filter((m) => !(m.costIn === 0 && m.costOut === 0)));
     }).catch(() => { /* picker still shows Auto; retried next open */ });
     return () => { alive = false; };
   }, []);
@@ -214,7 +230,8 @@ export const Composer: React.FC<ComposerProps> = ({
   const activeModeItem = MODE_ITEMS.find((m) => m.id === mode) || MODE_ITEMS[0];
   const activeModelLabel = selectedModel === 'auto'
     ? 'Auto'
-    : freeModels.find((m) => m.id === selectedModel)?.display_name || 'Custom model';
+    : [...freeModels, ...premiumModels].find((m) => m.id === selectedModel)?.display_name || 'Custom model';
+  const savedProvider = getProviderConfig();
 
   return (
     <div className="absolute bottom-4 sm:bottom-6 left-0 right-0 px-3.5 sm:px-6 pointer-events-none z-30 flex justify-center">
@@ -362,6 +379,74 @@ export const Composer: React.FC<ComposerProps> = ({
                     Free model catalog could not load — Auto routing is used.
                   </div>
                 )}
+              </div>
+
+              {/* Premium / BYO-key models */}
+              <div className="pt-1.5">
+                <div className="px-3 pb-1 flex items-center justify-between text-[10px] font-mono text-[#9CA3AF] uppercase tracking-wider border-t border-white/6 pt-2">
+                  <span>More models</span>
+                  <span>{savedProvider ? 'your key' : 'key needed'}</span>
+                </div>
+                <div className="space-y-1">
+                  {premiumModels.map((m) => {
+                    const pickable = m.available || keyUnlocks(m, savedProvider);
+                    if (pickable) {
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            onModelChange?.(m.id);
+                            setShowModelMenu(false);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[14px] text-left transition-all cursor-pointer ${
+                            selectedModel === m.id
+                              ? 'bg-white/10 border border-[#93C5FD]/30'
+                              : 'text-[#9CA3AF] hover:text-white hover:bg-white/5 border border-transparent'
+                          }`}
+                        >
+                          <div className="min-w-0 flex items-center gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs font-sans font-semibold text-[#F3F4F6] truncate">{m.display_name}</div>
+                              <div className="text-[10px] text-[#6B7280] font-mono mt-0.5 truncate">
+                                {m.provider}{m.available ? '' : ' · via your key'}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[9px] font-mono text-[#6B7280] bg-white/6 border border-white/8 rounded-full px-1.5 py-0.5">
+                              ${m.costIn || 0}/M
+                            </span>
+                            {selectedModel === m.id && <Check size={13} className="text-[#93C5FD]" />}
+                          </div>
+                        </button>
+                      );
+                    }
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          setShowModelMenu(false);
+                          onAddProvider?.();
+                        }}
+                        className="w-full flex items-center justify-between px-3 py-2.5 rounded-[14px] text-left transition-all cursor-pointer opacity-50 hover:opacity-80 text-[#9CA3AF] hover:bg-white/5 border border-transparent"
+                        title="Add a provider key to use this model"
+                      >
+                        <div className="min-w-0 flex items-center gap-2">
+                          <Lock size={11} className="text-[#6B7280] shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-sans font-semibold text-[#F3F4F6] truncate">{m.display_name}</div>
+                            <div className="text-[10px] text-[#6B7280] font-sans mt-0.5">Add a key to unlock</div>
+                          </div>
+                        </div>
+                        <span className="text-[9px] font-mono text-[#6B7280] bg-white/6 border border-white/8 rounded-full px-1.5 py-0.5 shrink-0">
+                          ${m.costIn || 0}/M
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Divider + Add an AI provider */}

@@ -13,6 +13,8 @@ import {
 import {
   api,
   isBackendConfigured,
+  friendlyError,
+  getProviderConfig,
   mapPlanSteps,
   mapExecutionStages,
   mapVerificationChecks,
@@ -371,7 +373,6 @@ export const AppShell: React.FC = () => {
       }
       await runExecution(created.task.id, newMessages);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
       updateCurrentSession({
         state: 'failed',
         messages: [
@@ -379,7 +380,7 @@ export const AppShell: React.FC = () => {
           {
             id: `m-err-${Date.now()}`,
             role: 'assistant',
-            content: `Zyntry error: ${detail}`,
+            content: friendlyError(err),
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ],
@@ -390,6 +391,25 @@ export const AppShell: React.FC = () => {
   // Real execution: stream stage events, then materialize the full summary.
   const runExecution = async (taskId: string, baseMessages: ChatMessage[]) => {
     updateCurrentSession({ state: 'working' });
+    try {
+      await runExecutionInner(taskId, baseMessages);
+    } catch (err) {
+      updateCurrentSession({
+        state: 'failed',
+        messages: [
+          ...baseMessages,
+          {
+            id: `m-err-${Date.now()}`,
+            role: 'assistant',
+            content: friendlyError(err),
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ],
+      });
+    }
+  };
+
+  const runExecutionInner = async (taskId: string, baseMessages: ChatMessage[]) => {
     const live: ToolActivityItem[] = [];
     const summary = await api.streamTask(taskId, (event) => {
       const type = String(event.type ?? '');
