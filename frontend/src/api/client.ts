@@ -51,6 +51,56 @@ export function isBackendConfigured(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Bring-your-own AI provider (stored locally, sent per request)
+// ---------------------------------------------------------------------------
+
+export interface ProviderConfig {
+  provider: 'openai' | 'anthropic' | 'openrouter' | string;
+  key: string;
+  base?: string;
+}
+
+const PROVIDER_STORAGE_KEY = 'zyntry.aiProvider';
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+
+export function getProviderConfig(): ProviderConfig | null {
+  try {
+    const raw = localStorage.getItem(PROVIDER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ProviderConfig;
+    if (!parsed?.provider || !parsed?.key) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function setProviderConfig(config: ProviderConfig | null): void {
+  if (config && config.provider && config.key) {
+    localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify(config));
+  } else {
+    localStorage.removeItem(PROVIDER_STORAGE_KEY);
+  }
+}
+
+/**
+ * Headers that carry the caller's own provider key with each request. The key
+ * never leaves this device except in these HTTPS headers; the backend uses it
+ * for this request's inference only (nothing is stored server-side).
+ */
+export function providerHeaders(): Record<string, string> {
+  const cfg = getProviderConfig();
+  if (!cfg) return {};
+  const headers: Record<string, string> = {
+    'X-Zyntry-Provider': cfg.provider,
+    'X-Zyntry-Provider-Key': cfg.key,
+  };
+  const base = cfg.base && cfg.base.trim() ? cfg.base.trim() : cfg.provider === 'openrouter' ? OPENROUTER_BASE : '';
+  if (base) headers['X-Zyntry-Provider-Base'] = base;
+  return headers;
+}
+
+// ---------------------------------------------------------------------------
 // Backend DTOs (mirrors the FastAPI responses)
 // ---------------------------------------------------------------------------
 
@@ -164,7 +214,10 @@ async function request<T>(
 ): Promise<T> {
   const { backendUrl, apiToken } = getBackendConfig();
   if (!backendUrl) throw new ApiError(0, 'Backend not configured');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...providerHeaders(),
+  };
   if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
   const resp = await fetch(`${backendUrl}${path}`, {
     method,
@@ -217,9 +270,11 @@ export const api = {
   ): Promise<BackendSummary> => {
     const { backendUrl, apiToken } = getBackendConfig();
     if (!backendUrl) throw new ApiError(0, 'Backend not configured');
+    const headers: Record<string, string> = { ...providerHeaders() };
+    if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
     const resp = await fetch(`${backendUrl}/tasks/${taskId}/execute/stream`, {
       method: 'POST',
-      headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {},
+      headers,
     });
     if (!resp.ok || !resp.body) throw new ApiError(resp.status, 'stream request failed');
     const reader = resp.body.getReader();

@@ -22,6 +22,37 @@ def _allowed_origins() -> list[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+def _provider_overrides(request: Request) -> dict[str, str]:
+    """Caller-supplied provider credentials (bring-your-own-key).
+
+    The dashboard can send its own provider key per request:
+
+    - ``X-Zyntry-Provider``:       openai | anthropic | openrouter (default openai)
+    - ``X-Zyntry-Provider-Key``:   the caller's API key
+    - ``X-Zyntry-Provider-Base``:  optional OpenAI-compatible base URL
+      (e.g. OpenRouter); implied for the openrouter provider.
+
+    The key is applied to this request's runtime only — nothing is stored,
+    logged, or shared with other requests. Without a key the server's own
+    (free Workers AI) providers are used, exactly as before.
+    """
+    key = (request.headers.get("x-zyntry-provider-key") or "").strip()
+    if not key:
+        return {}
+    provider = ((request.headers.get("x-zyntry-provider") or "openai").strip() or "openai").lower()
+    base = (request.headers.get("x-zyntry-provider-base") or "").strip()
+    overrides: dict[str, str] = {}
+    if provider == "anthropic":
+        overrides["ANTHROPIC_API_KEY"] = key
+    else:
+        overrides["OPENAI_API_KEY"] = key
+        if provider == "openrouter" and not base:
+            base = "https://openrouter.ai/api/v1"
+        if base:
+            overrides["OPENAI_BASE_URL"] = base.rstrip("/")
+    return overrides
+
+
 app = FastAPI(
     title="Zyntry Code",
     description="Adaptive AI Engineering Agent — backend orchestration service",
@@ -39,6 +70,9 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
+    overrides = _provider_overrides(request)
+    if overrides:
+        request.scope["runtime_overrides"] = overrides
     response = await security_middleware(request, call_next)
     metrics.incr("http_requests_total")
     metrics.incr(f"http_requests_{request.method.lower()}")

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { WorkspaceMode } from '../types';
-import { WORKSPACE_FILES } from '../data/mockData';
+import { api } from '../api/client';
 import { 
   ArrowUp,
   Square, 
@@ -13,7 +13,8 @@ import {
   X, 
   Check, 
   FileCode,
-  Brain,
+  Cpu,
+  Plus,
   Mic,
   GitBranch,
   CornerDownLeft
@@ -26,6 +27,15 @@ interface ComposerProps {
   mode?: WorkspaceMode;
   onModeChange?: (mode: WorkspaceMode) => void;
   initialText?: string;
+  selectedModel?: string;
+  onModelChange?: (modelId: string) => void;
+  onAddProvider?: () => void;
+}
+
+interface FreeModelOption {
+  id: string;
+  display_name: string;
+  provider: string;
 }
 
 const MODE_ITEMS: { id: WorkspaceMode; label: string; icon: React.ReactNode; desc: string }[] = [
@@ -50,10 +60,10 @@ const MODE_ITEMS: { id: WorkspaceMode; label: string; icon: React.ReactNode; des
 ];
 
 const QUICK_BUBBLY_PROMPTS = [
-  { label: 'Fix token concurrency', text: 'Fix the token refresh concurrency race condition in src/auth/session.ts.' },
-  { label: 'Add Vitest tests', text: 'Add comprehensive unit tests for src/auth/session.ts verifying token renewal.' },
-  { label: 'Analyze blast radius', text: 'Analyze the blast radius of modifying token rotation in src/auth/session.ts.' },
-  { label: 'Explain invariants', text: 'Explain this repository architecture, entrypoints, and security invariants.' }
+  { label: 'Explain the codebase', text: 'Explain this repository architecture, entrypoints, and invariants.' },
+  { label: 'Find bugs', text: 'Review the current code for bugs, edge cases, and regressions.' },
+  { label: 'Add tests', text: 'Add unit tests for the core logic of this project.' },
+  { label: 'Refactor', text: 'Refactor the messiest module in this project for clarity and safety.' }
 ];
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -63,15 +73,20 @@ export const Composer: React.FC<ComposerProps> = ({
   mode = 'agent',
   onModeChange,
   initialText = '',
+  selectedModel = 'auto',
+  onModelChange,
+  onAddProvider,
 }) => {
   const [text, setText] = useState(initialText);
-  const [attachedFiles, setAttachedFiles] = useState<string[]>(['src/auth/session.ts']);
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showFileMenu, setShowFileMenu] = useState(false);
+  const [showModelMenu, setShowModelMenu] = useState(false);
   const [showQuickPrompts, setShowQuickPrompts] = useState(true);
-  
+  const [freeModels, setFreeModels] = useState<FreeModelOption[]>([]);
+  const [contextFiles] = useState<string[]>([]);
+
   // Interactive features
-  const [isDeepReasoning, setIsDeepReasoning] = useState(true);
   const [isListening, setIsListening] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -84,12 +99,37 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   }, [initialText]);
 
+  // Fetch the free model catalog for the model picker.
+  useEffect(() => {
+    let alive = true;
+    api.models().then((res) => {
+      if (!alive) return;
+      const models = (res.models as {
+        id: string;
+        display_name: string;
+        provider: string;
+        available: boolean;
+        cost: { in_per_1m: number; out_per_1m: number };
+      }[]) ?? [];
+      const free = models.filter((m) =>
+        Number(m.cost?.in_per_1m ?? 0) === 0
+        && Number(m.cost?.out_per_1m ?? 0) === 0);
+      setFreeModels(free.map((m) => ({
+        id: m.id,
+        display_name: m.display_name,
+        provider: m.provider,
+      })));
+    }).catch(() => { /* picker still shows Auto; retried next open */ });
+    return () => { alive = false; };
+  }, []);
+
   // Click outside to close popovers
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setShowModeMenu(false);
         setShowFileMenu(false);
+        setShowModelMenu(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -116,6 +156,7 @@ export const Composer: React.FC<ComposerProps> = ({
     } else if (e.key === 'Escape') {
       setShowModeMenu(false);
       setShowFileMenu(false);
+      setShowModelMenu(false);
     }
   };
 
@@ -125,6 +166,7 @@ export const Composer: React.FC<ComposerProps> = ({
     setText('');
     setShowModeMenu(false);
     setShowFileMenu(false);
+    setShowModelMenu(false);
     if (textareaRef.current) {
       textareaRef.current.style.height = '32px';
     }
@@ -157,8 +199,8 @@ export const Composer: React.FC<ComposerProps> = ({
       setTimeout(() => {
         setText((prev) => {
           const addition = prev 
-            ? `${prev} and verify against test suite` 
-            : 'Check session tokens concurrency and run dry-run verification';
+            ? `${prev} and verify against the test suite`
+            : 'Check the core logic for concurrency issues and run dry-run verification';
           setTimeout(adjustTextareaHeight, 40);
           return addition;
         });
@@ -170,6 +212,9 @@ export const Composer: React.FC<ComposerProps> = ({
   };
 
   const activeModeItem = MODE_ITEMS.find((m) => m.id === mode) || MODE_ITEMS[0];
+  const activeModelLabel = selectedModel === 'auto'
+    ? 'Auto'
+    : freeModels.find((m) => m.id === selectedModel)?.display_name || 'Custom model';
 
   return (
     <div className="absolute bottom-4 sm:bottom-6 left-0 right-0 px-3.5 sm:px-6 pointer-events-none z-30 flex justify-center">
@@ -254,7 +299,97 @@ export const Composer: React.FC<ComposerProps> = ({
           )}
         </AnimatePresence>
 
-        {/* 2. Floating Context / File Picker Popover */}
+        {/* 2. Floating Model Picker Popover */}
+        <AnimatePresence>
+          {showModelMenu && (
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.95 }}
+              transition={{ type: 'spring', stiffness: 450, damping: 28 }}
+              className="absolute bottom-full mb-3.5 left-0 w-80 max-h-80 overflow-y-auto bg-[#141A22] border border-white/12 rounded-[24px] p-3 shadow-2xl backdrop-blur-2xl z-40 space-y-1.5"
+            >
+              <div className="px-3 py-1.5 flex items-center justify-between text-[10px] font-mono text-[#9CA3AF] uppercase tracking-wider border-b border-white/6 pb-2">
+                <span>Free models</span>
+                <span className="text-[#55E6A5] font-mono font-medium">no key needed</span>
+              </div>
+              <div className="space-y-1 pt-1">
+                {/* Auto — smart per-stage routing */}
+                <button
+                  id="zyntry-model-auto"
+                  type="button"
+                  onClick={() => {
+                    onModelChange?.('auto');
+                    setShowModelMenu(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[14px] text-left transition-all cursor-pointer ${
+                    selectedModel === 'auto'
+                      ? 'bg-white/10 border border-[#93C5FD]/30'
+                      : 'text-[#9CA3AF] hover:text-white hover:bg-white/5 border border-transparent'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-sans font-semibold text-[#F3F4F6]">Auto routing</div>
+                    <div className="text-[10px] text-[#6B7280] font-sans mt-0.5">
+                      Zyntry picks the best free model per task stage
+                    </div>
+                  </div>
+                  {selectedModel === 'auto' && <Check size={13} className="shrink-0 text-[#93C5FD]" />}
+                </button>
+                {freeModels.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => {
+                      onModelChange?.(m.id);
+                      setShowModelMenu(false);
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[14px] text-left transition-all cursor-pointer ${
+                      selectedModel === m.id
+                        ? 'bg-white/10 border border-[#93C5FD]/30'
+                        : 'text-[#9CA3AF] hover:text-white hover:bg-white/5 border border-transparent'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-sans font-semibold text-[#F3F4F6] truncate">{m.display_name}</div>
+                      <div className="text-[10px] text-[#6B7280] font-mono mt-0.5 truncate">{m.id}</div>
+                    </div>
+                    {selectedModel === m.id && <Check size={13} className="shrink-0 text-[#93C5FD]" />}
+                  </button>
+                ))}
+                {freeModels.length === 0 && (
+                  <div className="px-3 py-2 text-[11px] text-[#6B7280] font-sans">
+                    Free model catalog could not load — Auto routing is used.
+                  </div>
+                )}
+              </div>
+
+              {/* Divider + Add an AI provider */}
+              <div className="mx-1 my-1 border-t border-white/6" />
+              <button
+                id="zyntry-add-provider"
+                type="button"
+                onClick={() => {
+                  setShowModelMenu(false);
+                  onAddProvider?.();
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[14px] text-left text-xs transition-all cursor-pointer text-[#9CA3AF] hover:text-white hover:bg-white/5 border border-transparent"
+              >
+                <div className="w-6 h-6 rounded-lg bg-white/8 border border-white/12 flex items-center justify-center text-[#93C5FD] shrink-0">
+                  <Plus size={12} />
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold text-[#F3F4F6]">Add an AI provider</div>
+                  <div className="text-[10px] text-[#6B7280] font-sans mt-0.5">
+                    Bring your own API key for premium models (GPT-5, Claude …)
+                  </div>
+                </div>
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* 3. Floating Context / File Picker Popover */}
         <AnimatePresence>
           {showFileMenu && (
             <motion.div
@@ -268,8 +403,15 @@ export const Composer: React.FC<ComposerProps> = ({
                 <span>In-Scope Context Files</span>
                 <span className="text-[#93C5FD] font-mono font-medium">{attachedFiles.length} attached</span>
               </div>
-              <div className="space-y-1 pt-1">
-                {WORKSPACE_FILES.map((file) => {
+              {contextFiles.length === 0 ? (
+                <div className="px-3 py-4 text-center text-[11px] text-[#6B7280] font-sans leading-relaxed">
+                  No context files yet.
+                  <br />
+                  Zyntry explores your workspace automatically — attached files appear here.
+                </div>
+              ) : (
+                <div className="space-y-1 pt-1">
+                  {contextFiles.map((file: string) => {
                   const isSelected = attachedFiles.includes(file);
                   return (
                     <button
@@ -289,13 +431,14 @@ export const Composer: React.FC<ComposerProps> = ({
                       {isSelected && <Check size={13} className="shrink-0 text-[#93C5FD]" />}
                     </button>
                   );
-                })}
-              </div>
+                  })}
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* 3. The Main Composer Capsule (Unified Dark Obsidian Palette) */}
+        {/* 4. The Main Composer Capsule (Unified Dark Obsidian Palette) */}
         <div className="w-full bg-[#121821]/95 hover:bg-[#141C26] focus-within:bg-[#151E28] border border-white/12 hover:border-white/20 focus-within:border-[#93C5FD]/40 rounded-[28px] sm:rounded-[34px] p-3 sm:p-4 space-y-3 shadow-2xl backdrop-blur-2xl transition-all">
           
           {/* Active Attached Files Chips */}
@@ -405,6 +548,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 onClick={() => {
                   setShowModeMenu(!showModeMenu);
                   setShowFileMenu(false);
+                  setShowModelMenu(false);
                 }}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/6 hover:bg-white/10 border border-white/10 text-[11px] font-medium text-[#F3F4F6] cursor-pointer transition-all shadow-xs"
                 title="Change Execution Mode"
@@ -420,6 +564,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 onClick={() => {
                   setShowFileMenu(!showFileMenu);
                   setShowModeMenu(false);
+                  setShowModelMenu(false);
                 }}
                 className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border text-[11px] font-mono cursor-pointer transition-all shadow-xs ${
                   attachedFiles.length > 0 
@@ -436,20 +581,20 @@ export const Composer: React.FC<ComposerProps> = ({
                 </span>
               </button>
 
-              {/* Action 3: Deep Reasoning Toggle */}
+              {/* Action 3: Model Selector */}
               <button
                 type="button"
-                onClick={() => setIsDeepReasoning(!isDeepReasoning)}
-                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border text-[11px] cursor-pointer transition-all shadow-xs ${
-                  isDeepReasoning 
-                    ? 'bg-white/6 border-white/12 text-[#F3F4F6] hover:bg-white/10' 
-                    : 'bg-transparent border-white/8 text-[#9CA3AF] hover:text-[#F3F4F6]'
-                }`}
-                title="Toggle Deep Reasoning Model Allocation"
+                onClick={() => {
+                  setShowModelMenu(!showModelMenu);
+                  setShowModeMenu(false);
+                  setShowFileMenu(false);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/6 hover:bg-white/10 border border-white/10 text-[11px] font-medium text-[#F3F4F6] cursor-pointer transition-all shadow-xs"
+                title="Choose a model"
               >
-                <Brain size={12} className={isDeepReasoning ? "text-[#93C5FD]" : "text-[#9CA3AF]"} />
-                <span className="hidden sm:inline">Reasoning</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${isDeepReasoning ? "bg-[#55E6A5]" : "bg-white/20"}`} />
+                <Cpu size={12} className="text-[#93C5FD]" />
+                <span className="max-w-32 truncate">{activeModelLabel}</span>
+                <ChevronUp size={12} className={`text-[#9CA3AF] transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
               </button>
 
             </div>

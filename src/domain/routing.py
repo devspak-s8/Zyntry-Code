@@ -74,12 +74,18 @@ def select_model(
     preferred_provider: str | None = None,
     catalog: list[ModelSpec] | None = None,
     stats: dict[str, dict] | None = None,
+    preferred_model: str | None = None,
 ) -> tuple[ModelSpec | None, list[ModelSpec], dict]:
     """Return ``(selected, candidates, reasoning)`` for a single stage.
 
     ``stats`` is the evidence layer: {model_id: routing_stats row}. Models with
     a poor success record get an effective-cost penalty so that routing improves
     over time instead of relying purely on static pricing.
+
+    ``preferred_model`` pins the model exactly (the dashboard's free-model
+    picker sets it via task constraints). When the pinned model is unavailable
+    (not in the catalog or its provider is not configured), normal routing
+    applies so a task never hard-fails on a stale selection.
     """
     catalog = catalog or MODELS
     provider_order = provider_order or []
@@ -104,12 +110,31 @@ def select_model(
 
     needed = {str(c) for c in caps}
 
+    exact: list[ModelSpec] = []
+    if preferred_model:
+        exact = [
+            m for m in catalog
+            if m.id == preferred_model and m.provider in available_providers
+        ]
+        if exact:
+            reasoning = {
+                "min_tier": min_tier,
+                "required_capabilities": sorted(c.value for c in caps),
+                "available_providers": sorted(available_providers),
+                "candidate_count": 1,
+                "evidence_adjusted": bool(stats),
+                "preferred_model": preferred_model,
+                "pinned": True,
+            }
+            return exact[0], exact, reasoning
+
     candidates = [
         m for m in catalog
         if m.provider in available_providers
         and m.tier >= min_tier
         and needed <= {str(c) for c in m.capabilities}
         and (preferred_provider is None or m.provider == preferred_provider)
+        and (preferred_model is None or m.id == preferred_model)
     ]
 
     # Cheapest effective cost first, then provider preference, then lower tier (faster).
@@ -123,4 +148,7 @@ def select_model(
         "candidate_count": len(candidates),
         "evidence_adjusted": bool(stats),
     }
+    if preferred_model and not exact:
+        reasoning["preferred_model"] = preferred_model
+        reasoning["preferred_model_unavailable"] = True
     return selected, candidates, reasoning

@@ -328,8 +328,10 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
     await ctx.emit("stage_started", f"Stage: {stage['title']}", {"kind": kind}, stage_id=stage["id"])
 
     stats = await store.get_routing_stats(db, kind, risk)
+    constraints = store.task_dict(ctx.task).get("constraints") or {}
     selected, candidates, reasoning = routing.select_model(
-        kind, risk, ctx.available_providers, ctx.provider_order, stats=stats)
+        kind, risk, ctx.available_providers, ctx.provider_order, stats=stats,
+        preferred_model=(constraints.get("model") or None))
     if selected is None:
         metrics.incr("routing_no_eligible_model")
         await store.update_stage(db, stage["id"], status=StageStatus.FAILED.value)

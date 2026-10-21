@@ -23,7 +23,6 @@ import {
   buildAssistantSummaryMessage,
   executionAgentState,
 } from '../api/client';
-import { WORKSPACE_FILES } from '../data/mockData';
 import { narrateEvent } from '../api/narration';
 import { Sidebar, SidebarTab } from './Sidebar';
 import { TopBar } from './TopBar';
@@ -37,10 +36,10 @@ import { StatusBadge } from './StatusBadge';
 import { SettingsView } from './SettingsView';
 import { ConstitutionView } from './ConstitutionView';
 import { WorkspaceSetupLoader } from './WorkspaceSetupLoader';
-import { BackendBadge } from './BackendBadge';
 import { RepoIngestButton } from './RepoIngestButton';
 import { WorkspaceDialog } from './WorkspaceDialog';
 import { DeliverPanel } from './DeliverPanel';
+import { ProviderModal } from './ProviderModal';
 import { BackendWorkspace } from '../api/client';
 import { downloadTranscript } from '../api/transcript';
 import { CheckCircle2, RotateCcw, FileDown } from 'lucide-react';
@@ -109,6 +108,18 @@ export const AppShell: React.FC = () => {
   const [liveToolActivities, setLiveToolActivities] = useState<ToolActivityItem[]>([]);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [deliverOpen, setDeliverOpen] = useState(false);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    localStorage.getItem('zyntry.model') || 'auto');
+
+  const handleModelChange = (modelId: string) => {
+    setSelectedModel(modelId);
+    try {
+      localStorage.setItem('zyntry.model', modelId);
+    } catch {
+      /* storage may be unavailable in embedded contexts */
+    }
+  };
 
   // Active session helper
   const currentSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
@@ -334,7 +345,7 @@ export const AppShell: React.FC = () => {
             id: `m-connect-${Date.now()}`,
             role: 'assistant',
             content:
-              'Connect Zyntry first — click the "Not connected" badge (bottom-right) and enter the service URL (e.g. http://localhost:8787).',
+              'Zyntry service is not reachable right now — it normally connects automatically. Check your network and retry.',
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ],
@@ -346,6 +357,7 @@ export const AppShell: React.FC = () => {
       const created = await api.createTask(text, {
         budget_usd: taskBudget,
         max_attempts_per_stage: 2,
+        ...(selectedModel && selectedModel !== 'auto' ? { model: selectedModel } : {}),
       });
       updateCurrentSession({
         backendTaskId: created.task.id,
@@ -503,9 +515,9 @@ export const AppShell: React.FC = () => {
           activeSessionId={activeSessionId}
           onSelectSession={setActiveSessionId}
           onNewTask={handleNewTask}
-          repoName="zyntry-core-engine"
+          repoName="workspace"
           branch={currentSession.branch}
-          activeFiles={WORKSPACE_FILES}
+          activeFiles={[]}
           runtime={runtime}
           onCloseMobileDrawer={() => setIsMobileSidebarOpen(false)}
         />
@@ -515,7 +527,7 @@ export const AppShell: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-transparent">
         {/* TopBar */}
         <TopBar
-          repoName="zyntry-core-engine"
+          repoName="workspace"
           branch={currentSession.branch}
           runtime={runtime}
           onRuntimeChange={setRuntime}
@@ -786,6 +798,9 @@ export const AppShell: React.FC = () => {
                     updateCurrentSession({ mode: newMode });
                   }}
                   initialText={composerSeedText}
+                  selectedModel={selectedModel}
+                  onModelChange={handleModelChange}
+                  onAddProvider={() => setProviderModalOpen(true)}
                 />
               )}
             </>
@@ -808,7 +823,7 @@ export const AppShell: React.FC = () => {
         title={currentSession.title}
         onClose={() => setDeliverOpen(false)}
       />
-      <BackendBadge />
+      <ProviderModal isOpen={providerModalOpen} onClose={() => setProviderModalOpen(false)} />
     </motion.div>
   );
 };

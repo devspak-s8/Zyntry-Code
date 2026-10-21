@@ -19,9 +19,16 @@ from db import Database, D1Database, SQLiteDatabase
 class Runtime:
     env: Any = None
     db: Database | None = None
+    # Per-request credential overrides (e.g. a caller's own provider key sent
+    # via headers). Never persisted; checked before env vars in ``get``.
+    overrides: dict[str, Any] | None = None
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Read a setting: Workers env var/secret first, then OS env."""
+        """Read a setting: request overrides, then Workers env var, then OS env."""
+        if self.overrides:
+            value = self.overrides.get(key)
+            if value:
+                return value
         if self.env is not None:
             value = getattr(self.env, key, None)
             if value is not None and value != "":
@@ -71,7 +78,11 @@ def local_runtime() -> Runtime:
 
 def get_runtime(request: Request) -> Runtime:
     """FastAPI dependency: resolve the runtime for the current request."""
-    env = request.scope.get("env")
-    if env is not None:
-        return runtime_from_env(env)
-    return local_runtime()
+    if request.scope.get("env") is not None:
+        runtime = runtime_from_env(request.scope["env"])
+    else:
+        runtime = local_runtime()
+    overrides = request.scope.get("runtime_overrides")
+    if overrides:
+        runtime.overrides = dict(overrides)
+    return runtime

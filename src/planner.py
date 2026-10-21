@@ -94,7 +94,8 @@ def parse_plan_json(text: str) -> dict | None:
     return {"summary": str(data.get("summary") or "")[:500], "stages": normalized}
 
 
-async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[dict]) -> dict:
+async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[dict],
+                    constraints: dict | None = None) -> dict:
     """LLM-driven planning with refinement; raises RuntimeError on failure.
 
     The model proposes the plan as strict JSON; if validation fails, the
@@ -112,7 +113,8 @@ async def _llm_plan(runtime: Runtime, prompt: str, risk: str, repo_files: list[d
             "available. Planning is LLM-only; set provider keys and retry.")
 
     selected, _, _ = routing.select_model(
-        StageKind.PLAN.value, risk, avail, provider_order(runtime))
+        StageKind.PLAN.value, risk, avail, provider_order(runtime),
+        preferred_model=((constraints or {}).get("model") or None))
     if selected is None:
         raise RuntimeError(
             "No plan-capable model is available from the configured providers. "
@@ -194,7 +196,8 @@ async def create_and_plan(runtime: Runtime, *, prompt: str, repo: str | None,
     # Planning is LLM-only: _llm_plan raises on failure (no providers, no
     # plan-capable model, provider error, or invalid JSON after refinement).
     # The API maps this to a 503 — loud failure, never a silent template.
-    llm_plan = await _llm_plan(runtime, prompt, risk, repo_files)
+    llm_plan = await _llm_plan(runtime, prompt, risk, repo_files,
+                               constraints=merged_constraints)
     source = "llm"
     summary = llm_plan["summary"] or truncate(prompt, 200)
     draft_stages = llm_plan["stages"]

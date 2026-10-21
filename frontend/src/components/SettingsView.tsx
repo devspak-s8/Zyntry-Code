@@ -424,10 +424,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <div className="p-4 rounded-[22px] bg-[#121820]/90 border border-white/10 flex items-start gap-3 shadow-md backdrop-blur-md">
         <Info size={16} className="text-[#93C5FD] shrink-0 mt-0.5" />
         <div className="text-xs leading-relaxed text-[#9CA3AF]">
-          <span className="font-semibold text-white">Security & Governance Architecture: </span>
-          Raw API keys, provider credentials, organizational IAM roles, and project billing are securely managed in the{' '}
-          <span className="text-[#93C5FD] font-medium underline cursor-pointer hover:text-white">Rivet Console</span>. 
-          Local settings control your IDE experience, while the connected runtime acts as the authoritative security sandbox.
+          <span className="font-semibold text-white">Security & Governance: </span>
+          You can add your own AI provider from the composer's model picker (keys stay on your device).
+          The connected service applies rate limits and task budgets automatically.
         </div>
       </div>
 
@@ -904,18 +903,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 />
               </div>
 
-              {/* Console Governance Note */}
+              {/* Governance Note */}
               <div className="p-4 rounded-2xl bg-white/4 border border-white/8 flex items-center justify-between gap-3 text-xs">
                 <div className="text-[#9CA3AF]">
-                  Model credentials, per-user token quotas, and enterprise rate limits are managed in <span className="text-white font-medium">Rivet Console</span>.
+                  Model credentials can be your own (Add an AI provider in the composer) — the service maps them to task budgets automatically.
                 </div>
                 <button
                   type="button"
-                  onClick={() => triggerToast('Opening Rivet Console Runtime Policy...')}
+                  onClick={() => triggerToast('Model credentials: add your key from the composer model picker')}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/8 hover:bg-white/14 text-white text-[11px] font-medium transition-colors shrink-0 cursor-pointer"
                 >
-                  <span>Runtime Policy</span>
-                  <ExternalLink size={11} />
+                  <span>How it works</span>
                 </button>
               </div>
 
