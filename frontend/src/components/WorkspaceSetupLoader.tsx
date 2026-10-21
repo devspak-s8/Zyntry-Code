@@ -12,7 +12,7 @@ const SETUP_MESSAGES = [
   'Setting up workspace...',
   'Analyzing repository AST...',
   'Mounting virtual diff tree...',
-  'Checking project constitution...',
+  'Preparing your workspace...',
   'Ready',
 ];
 

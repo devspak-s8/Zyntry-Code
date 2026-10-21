@@ -36,7 +36,6 @@ import { VerificationPanel } from './VerificationPanel';
 import { InlineApproval, ApprovalVariant } from './InlineApproval';
 import { StatusBadge } from './StatusBadge';
 import { SettingsView } from './SettingsView';
-import { ConstitutionView } from './ConstitutionView';
 import { WorkspaceSetupLoader } from './WorkspaceSetupLoader';
 import { RepoIngestButton } from './RepoIngestButton';
 import { WorkspaceDialog } from './WorkspaceDialog';
@@ -100,7 +99,6 @@ export const AppShell: React.FC = () => {
     return Number.isFinite(stored) && stored > 0 ? stored : 1.0;
   });
   const [runtime, setRuntime] = useState<string>('Node v22.14 LTS');
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [showApprovalDialog, setShowApprovalDialog] = useState<boolean>(false);
   const [isChangesApplied, setIsChangesApplied] = useState<boolean>(false);
   const [isSubmittingApproval, setIsSubmittingApproval] = useState<boolean>(false);
@@ -113,6 +111,15 @@ export const AppShell: React.FC = () => {
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>(() =>
     localStorage.getItem('zyntry.model') || 'auto');
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 768 : true);
+
+  // On phones the sidebar becomes a drawer: selecting content closes it.
+  const closeSidebarIfMobile = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setIsSidebarOpen(false);
+    }
+  };
 
   const handleModelChange = (modelId: string) => {
     setSelectedModel(modelId);
@@ -501,7 +508,7 @@ export const AppShell: React.FC = () => {
           setIsSettingUpWorkspace(false);
           setCurrentTab('chat');
         }}
-        repoName="zyntry-core-engine"
+        repoName="workspace"
         branch={currentSession.branch}
       />
     );
@@ -514,18 +521,18 @@ export const AppShell: React.FC = () => {
       transition={{ duration: 0.45, ease: 'easeOut' }}
       className="flex h-screen w-screen overflow-hidden bg-[#0D1217] text-[#F2F6F4]"
     >
-      {/* Mobile Drawer Overlay */}
-      {isMobileSidebarOpen && (
+      {/* Overlay when the sidebar is expanded (mobile only) */}
+      {isSidebarOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm md:hidden"
-          onClick={() => setIsMobileSidebarOpen(false)}
+          onClick={() => setIsSidebarOpen(false)}
         />
       )}
 
-      {/* 1. Left Sidebar */}
+      {/* 1. Left Sidebar (collapsible on every screen size) */}
       <div
-        className={`fixed inset-y-0 left-0 z-50 transition-transform duration-250 ease-in-out md:static md:translate-x-0 ${
-          isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`fixed inset-y-0 left-0 z-50 md:static ${
+          isSidebarOpen ? 'flex' : 'hidden'
         }`}
       >
         <Sidebar
@@ -539,7 +546,8 @@ export const AppShell: React.FC = () => {
           branch={currentSession.branch}
           activeFiles={[]}
           runtime={runtime}
-          onCloseMobileDrawer={() => setIsMobileSidebarOpen(false)}
+          onClose={() => setIsSidebarOpen(false)}
+          onCloseMobileDrawer={closeSidebarIfMobile}
         />
       </div>
 
@@ -559,7 +567,12 @@ export const AppShell: React.FC = () => {
             });
           }}
           routingInfo={currentSession.routing}
-          onToggleMobileSidebar={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
+          onToggleMobileSidebar={() => setIsSidebarOpen((v) => !v)}
+          onNewTask={handleNewTask}
+          onOpenSettings={() => {
+            setCurrentTab('settings');
+            closeSidebarIfMobile();
+          }}
         />
 
         {/* Tab Views - Single Unified Scroll Container without separate scroll traps */}
@@ -570,7 +583,7 @@ export const AppShell: React.FC = () => {
             {currentTab === 'chat' &&
               (currentSession.messages.length === 0 ? (
                 <EmptyState
-                  repoName="zyntry-core-engine"
+                  repoName="workspace"
                   branch={currentSession.branch}
                 />
               ) : (
@@ -674,10 +687,7 @@ export const AppShell: React.FC = () => {
               </motion.div>
             )}
 
-            {/* 5. CONSTITUTION TAB */}
-            {currentTab === 'constitution' && <ConstitutionView />}
-
-            {/* 6. HISTORY TAB */}
+            {/* 5. HISTORY TAB */}
             {currentTab === 'history' && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}

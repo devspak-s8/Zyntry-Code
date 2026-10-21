@@ -5,7 +5,9 @@ import {
   FolderGit2, 
   Menu,
   ChevronDown,
-  Check
+  Check,
+  Plus,
+  Sliders
 } from 'lucide-react';
 
 interface TopBarProps {
@@ -18,6 +20,8 @@ interface TopBarProps {
   onRoutingModeChange: (rm: RoutingMode) => void;
   routingInfo: RoutingInfo;
   onToggleMobileSidebar: () => void;
+  onNewTask?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -26,6 +30,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   routingMode,
   onRoutingModeChange,
   onToggleMobileSidebar,
+  onNewTask,
+  onOpenSettings,
 }) => {
   const [showRoutingMenu, setShowRoutingMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -48,14 +54,14 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onToggleMobileSidebar}
-          className="p-2 rounded-full text-[#A3AEAA] hover:text-[#F2F6F4] hover:bg-white/10 md:hidden cursor-pointer transition-colors shrink-0"
-          title="Toggle workspace navigation"
+          className="p-2 rounded-full text-[#A3AEAA] hover:text-[#F2F6F4] hover:bg-white/10 cursor-pointer transition-colors shrink-0"
+          title="Toggle sidebar"
         >
           <Menu size={16} />
         </button>
 
         {/* Bubbly Repository & Branch Pill */}
-        <div className="flex items-center gap-2 px-3 sm:px-3.5 py-1.5 rounded-full bg-white/6 hover:bg-white/9 border border-white/10 text-xs font-mono text-[#F2F6F4] shadow-xs transition-colors">
+        <div className="flex items-center gap-2 px-3 sm:px-3.5 py-1.5 rounded-full bg-white/6 hover:bg-white/9 border border-white/10 text-xs font-mono text-[#F2F6F4] shadow-xs transition-colors truncate">
           <FolderGit2 size={13} className="text-[#93C5FD] shrink-0" />
           <span className="font-semibold truncate">{repoName}</span>
           <span className="text-white/20">/</span>
@@ -66,8 +72,28 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
       </div>
 
-      {/* Right: Bubbly Model routing tier + context panel toggle */}
+      {/* Right: Nav actions at the top (web-app style) + routing tier */}
       <div className="flex items-center gap-2 sm:gap-2.5">
+        {/* New chat */}
+        <button
+          type="button"
+          onClick={onNewTask}
+          className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-full bg-white/6 hover:bg-white/10 border border-white/10 text-xs font-medium text-[#F2F6F4] cursor-pointer transition-all shadow-xs"
+          title="New chat"
+        >
+          <Plus size={13} className="text-[#93C5FD]" />
+          <span className="hidden xs:inline sm:inline">New chat</span>
+        </button>
+
+        {/* Settings */}
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="p-2 rounded-full bg-white/6 hover:bg-white/10 border border-white/10 text-[#A3AEAA] hover:text-[#F2F6F4] cursor-pointer transition-all shadow-xs"
+          title="Settings"
+        >
+          <Sliders size={13} />
+        </button>
         {/* Model routing selector pill */}
         <div className="relative" ref={menuRef}>
           <button

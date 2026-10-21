@@ -8,12 +8,12 @@ import {
   SquareTerminal, 
   GitPullRequest, 
   ShieldCheck, 
-  Scale,
+  PanelLeftClose,
   History,
   Sliders
 } from 'lucide-react';
 
-export type SidebarTab = 'chat' | 'changes' | 'verification' | 'constitution' | 'history' | 'settings';
+export type SidebarTab = 'chat' | 'changes' | 'verification' | 'history' | 'settings';
 
 interface SidebarProps {
   currentTab: SidebarTab;
@@ -22,6 +22,7 @@ interface SidebarProps {
   activeSessionId: string;
   onSelectSession: (id: string) => void;
   onNewTask: () => void;
+  onClose?: () => void;
   repoName?: string;
   branch?: string;
   activeFiles?: string[];
@@ -37,6 +38,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeSessionId,
   onSelectSession,
   onNewTask,
+  onClose,
   onCloseMobileDrawer,
 }) => {
   const navItems: { id: SidebarTab; label: string; icon: React.ReactNode; color: string }[] = [
@@ -57,12 +59,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Verification', 
       icon: <ShieldCheck size={15} />, 
       color: 'text-[#55E6A5]' 
-    },
-    { 
-      id: 'constitution', 
-      label: 'Constitution', 
-      icon: <Scale size={15} />, 
-      color: 'text-[#93C5FD]' 
     },
     { 
       id: 'history', 
@@ -103,6 +99,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
         </div>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-[#6B7280] hover:text-[#F2F6F4] hover:bg-white/8 transition-colors cursor-pointer"
+            title="Collapse sidebar"
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        )}
       </div>
 
       {/* 2. New Task Action Button */}

@@ -1,8 +1,8 @@
 {
   "name": "zyntry-code",
   "displayName": "Zyntry Code",
-  "description": "Create, approve, run, and stream AI-planned engineering tasks; ingest your repo; and serve as the local execution runner. Bundles the full Zyntry dashboard UI in the sidebar.",
-  "version": "0.3.3",
+  "description": "Run AI coding tasks in your open folder. Describe what you want in the sidebar; Zyntry plans, edits, and verifies. Free models included.",
+  "version": "0.3.4",
   "publisher": "ZyntryCode",
   "license": "MIT",
   "icon": "icon.png",
