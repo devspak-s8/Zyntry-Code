@@ -203,6 +203,12 @@ def _build_prompt(task: dict, stage: dict, prior_outputs: dict[str, str],
     return "\n\n".join(parts)
 
 
+async def _task_cancelled(db, task_id: str) -> bool:
+    """True when the developer pressed Stop: the task row reads cancelled."""
+    task = await store.get_task(db, task_id)
+    return task is not None and task["status"] == TaskStatus.CANCELLED.value
+
+
 async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallback | None = None,
                        verify_wait_seconds: int = 0,
                        retry_stage_ids: list[str] | None = None) -> dict:
@@ -309,6 +315,10 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
     outputs: dict[str, str] = dict(prior_outputs_preload)
 
     for level in topo_levels(stages):
+        if not ctx.cancelled and await _task_cancelled(db, task_id):
+            ctx.cancelled = True
+        if ctx.cancelled:
+            break  # developer pressed Stop — skip every remaining stage below
         if ctx.budget_exceeded:
             for s in level:
                 await store.update_stage(db, s["id"], status=StageStatus.SKIPPED.value)
@@ -344,21 +354,38 @@ async def execute_task(runtime: Runtime, task_id: str, *, on_event: EventCallbac
     # Success is judged from the final stage table: a task is complete only when
     # no stage is left failed, blocked, or never-run (retries included).
     statuses = await store.get_stage_statuses(db, plan["id"])
+    if not ctx.cancelled:
+        ctx.cancelled = await _task_cancelled(db, task_id)
+    if ctx.cancelled:
+        # Stopped by the developer: nothing may hang around as running or
+        # pending after a stop.
+        for sid, st in statuses.items():
+            if st in (StageStatus.RUNNING.value, StageStatus.PENDING.value):
+                await store.update_stage(db, sid, status=StageStatus.SKIPPED.value)
+        statuses = await store.get_stage_statuses(db, plan["id"])
     success = (
         not ctx.budget_exceeded
+        and not ctx.cancelled
         and not any(st in (StageStatus.FAILED.value, StageStatus.BLOCKED.value,
                            StageStatus.PENDING.value)
                     for st in statuses.values())
     )
-    final_status = ExecutionStatus.COMPLETED.value if success else ExecutionStatus.FAILED.value
-    task_status = TaskStatus.COMPLETED.value if success else TaskStatus.FAILED.value
+    if ctx.cancelled:
+        final_status = ExecutionStatus.CANCELLED.value
+        task_status = TaskStatus.CANCELLED.value
+    else:
+        final_status = ExecutionStatus.COMPLETED.value if success else ExecutionStatus.FAILED.value
+        task_status = TaskStatus.COMPLETED.value if success else TaskStatus.FAILED.value
     await store.update_execution(db, execution_id, status=final_status, finished_at=now_iso())
     await store.update_task(db, task_id, status=task_status)
 
     metrics.observe("execution_duration_seconds", time.perf_counter() - started)
     metrics.incr(f"execution_status_{final_status}")
 
-    if ctx.budget_exceeded:
+    if ctx.cancelled:
+        await ctx.emit("execution_cancelled", "Execution stopped by developer",
+                       {"task_id": task_id})
+    elif ctx.budget_exceeded:
         await ctx.emit("budget_exceeded",
                        f"Execution stopped: estimated cost exceeded budget of ${budget:,.4f}",
                        {"budget_usd": budget, "spent_usd": round(ctx.spend, 6)})
@@ -398,6 +425,7 @@ class _RunContext:
         self.spend = 0.0
         self.total_tokens = 0
         self.budget_exceeded = False
+        self.cancelled = False
         self.compact_cache: dict[str, dict] = {}
         self._providers: dict[str, Any] = {}
 
@@ -509,6 +537,14 @@ async def _run_stage(ctx: _RunContext, stage: dict, prior_outputs: dict[str, str
     repair_used = False
 
     for attempt_number in range(1, ctx.max_attempts + 1):
+        # Stop button: between attempts, notice a cancelled task and bail out.
+        if await _task_cancelled(db, ctx.task["id"]):
+            ctx.cancelled = True
+            await store.update_stage(db, stage["id"], status=StageStatus.SKIPPED.value)
+            await ctx.emit("stage_skipped", "Stage skipped: execution stopped by developer",
+                           stage_id=stage["id"])
+            return False, ""
+
         # Budget guard: reserve the *entire* projected cost of finishing this
         # stage — remaining retries with growing input context, model output,
         # escalation, and verification operations — before starting an attempt.

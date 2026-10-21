@@ -138,3 +138,40 @@ async def test_high_risk_task_requires_approval(runtime, patch_valid):
     from executor import execute_task
     with pytest.raises(PermissionError):
         await execute_task(runtime, result["task"]["id"])
+
+
+async def test_execute_stops_when_task_cancelled(runtime, patch_valid, monkeypatch):
+    """Stop button: a task cancelled mid-run aborts at the next boundary.
+
+    The first stage's model call cancels the task behind the engine's back
+    (as the cancel endpoint does); the next level sees it and stops."""
+    task_id = await _create_task(runtime, "Add a new API endpoint to return user profiles")
+    import store
+    from domain.enums import TaskStatus
+
+    calls = {"n": 0}
+
+    class CancelsMidRun:
+        name = "fake"
+
+        def __init__(self, rt):
+            self.runtime = rt
+
+        async def complete(self, model, prompt, system=None, temperature=0.2, max_tokens=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await store.update_task(self.runtime.db, task_id, status=TaskStatus.CANCELLED.value)
+            return LLMResult(text=VALID_PYTHON, model=model, provider="fake",
+                             tokens_in=10, tokens_out=10)
+
+    _patch(monkeypatch, runtime, CancelsMidRun, [FAKE_STRONG])
+
+    from executor import execute_task
+    summary = await execute_task(runtime, task_id)
+
+    assert summary["task"]["status"] == "cancelled"
+    assert summary["execution"]["status"] == "cancelled"
+    assert calls["n"] >= 1  # the attempt in flight finished, then everything stopped
+    assert any(s["status"] == "skipped" for s in summary["stages"])
+    stage_statuses = {s["title"]: s["status"] for s in summary["stages"]}
+    assert all(s["status"] in ("succeeded", "skipped") for s in summary["stages"]), stage_statuses

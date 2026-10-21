@@ -70,6 +70,24 @@ async def approve_task(task_id: str, body: ApproveRequest, runtime: Runtime = De
     return {"task_id": task_id, "status": TaskStatus.PLANNED.value}
 
 
+@router.post("/{task_id}/cancel")
+async def cancel_task(task_id: str, runtime: Runtime = Depends(get_runtime)) -> dict:
+    """Stop a task: the engine aborts at the next stage/attempt boundary.
+
+    Idempotent — stopping an already-finished task is a no-op that reports
+    the terminal status. A running execution observes the cancelled status
+    from the database and marks itself cancelled on its next boundary check.
+    """
+    task = await store.get_task(runtime.db, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task["status"] in (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value,
+                          TaskStatus.CANCELLED.value):
+        return {"task_id": task_id, "status": task["status"], "cancelled": False}
+    await store.update_task(runtime.db, task_id, status=TaskStatus.CANCELLED.value)
+    return {"task_id": task_id, "status": TaskStatus.CANCELLED.value, "cancelled": True}
+
+
 @router.post("/{task_id}/execute")
 async def execute_task_endpoint(task_id: str, runtime: Runtime = Depends(get_runtime),
                                 mode: str = "sync") -> dict:

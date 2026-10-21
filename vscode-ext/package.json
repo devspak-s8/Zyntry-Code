@@ -2,7 +2,7 @@
   "name": "zyntry-code",
   "displayName": "Zyntry Code",
   "description": "Run AI coding tasks in your open folder. Describe what you want in the sidebar; Zyntry plans, edits, and verifies. Free models included.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "ZyntryCode",
   "license": "MIT",
   "icon": "icon.png",

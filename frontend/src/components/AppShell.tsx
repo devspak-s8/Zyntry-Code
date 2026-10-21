@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   AgentState,
@@ -414,6 +414,11 @@ export const AppShell: React.FC = () => {
     try {
       await runExecutionInner(taskId, baseMessages);
     } catch (err) {
+      // Pressing Stop aborts the stream on purpose — not a failure.
+      if ((err as { name?: string })?.name === 'AbortError') {
+        updateCurrentSession({ state: 'idle' });
+        return;
+      }
       updateCurrentSession({
         state: 'failed',
         messages: [
@@ -431,7 +436,11 @@ export const AppShell: React.FC = () => {
 
   const runExecutionInner = async (taskId: string, baseMessages: ChatMessage[]) => {
     const live: ToolActivityItem[] = [];
-    const summary = await api.streamTask(taskId, (event) => {
+    const controller = new AbortController();
+    runAbortRef.current = controller;
+    const summary = await api.streamTask(
+      taskId,
+      (event) => {
       const type = String(event.type ?? '');
       const narration = narrateEvent({
         type,
@@ -470,7 +479,7 @@ export const AppShell: React.FC = () => {
       if (type === 'verification_failed' || type === 'verification_limited') {
         updateCurrentSession({ state: 'verifying' });
       }
-    });
+    }, controller.signal);
 
     const changes = await api.getChanges(summary.execution.id).catch(() => ({ changes: [] }));
     const endState = executionAgentState(summary);
@@ -495,9 +504,34 @@ export const AppShell: React.FC = () => {
     setLiveToolActivities([]);
   };
 
+  // Cancel handle for the active execution stream; Stop aborts it and asks
+  // the backend to cancel the task so the engine stops at the next boundary.
+  const runAbortRef = useRef<AbortController | null>(null);
+
   // Stop running agent
   const handleStopAgent = () => {
-    updateCurrentSession({ state: 'idle' });
+    const controller = runAbortRef.current;
+    if (controller) {
+      try {
+        controller.abort();
+      } catch {
+        /* already aborted */
+      }
+    }
+    const taskId = currentSession.backendTaskId;
+    if (taskId) void api.cancelTask(taskId).catch(() => undefined);
+    updateCurrentSession({
+      state: 'idle',
+      messages: [
+        ...currentSession.messages,
+        {
+          id: `m-stopped-${Date.now()}`,
+          role: 'assistant',
+          content: 'Task stopped by you; the engine aborts at the next stage boundary.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ],
+    });
   };
 
   // Create new task

@@ -309,9 +309,15 @@ export const api = {
     }),
   executeTask: (taskId: string) =>
     request<BackendSummary>('POST', `/tasks/${taskId}/execute`),
+  cancelTask: (taskId: string) =>
+    request<{ task_id: string; status: string; cancelled: boolean }>(
+      'POST',
+      `/tasks/${taskId}/cancel`
+    ),
   streamTask: async (
     taskId: string,
-    onEvent: (event: Record<string, unknown>) => void
+    onEvent: (event: Record<string, unknown>) => void,
+    signal?: AbortSignal
   ): Promise<BackendSummary> => {
     const { backendUrl, apiToken } = getBackendConfig();
     if (!backendUrl) throw new ApiError(0, 'Backend not configured');
@@ -320,6 +326,7 @@ export const api = {
     const resp = await fetch(`${backendUrl}/tasks/${taskId}/execute/stream`, {
       method: 'POST',
       headers,
+      signal,
     });
     if (!resp.ok || !resp.body) throw new ApiError(resp.status, 'stream request failed');
     const reader = resp.body.getReader();
@@ -648,6 +655,7 @@ export function mapToolActivities(summary: BackendSummary): ToolActivityItem[] {
 
 export function executionAgentState(summary: BackendSummary): AgentState {
   if (summary.task.status === 'completed') return summary.escalation.occurred ? 'escalated' : 'complete';
+  if (summary.task.status === 'cancelled') return 'failed';
   if (summary.task.status === 'failed') return 'failed';
   if (summary.task.status === 'awaiting_approval') return 'awaiting_approval';
   return 'working';
@@ -736,7 +744,27 @@ function narrateRun(summary: BackendSummary): string {
 
 export function buildAssistantSummaryMessage(summary: BackendSummary): ChatMessage {
   const completed = summary.task.status === 'completed';
+  const cancelled = summary.task.status === 'cancelled';
   const lines: string[] = [];
+
+  if (cancelled) {
+    lines.push('Stopped.', '');
+    lines.push(narrateRun(summary));
+    lines.push('');
+    lines.push('You pressed Stop, so unused stages were skipped. Press Re-run below to start over.');
+    return {
+      id: `asst-${Date.now()}`,
+      role: 'assistant',
+      content: lines.join('\n'),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      executionStages: mapExecutionStages(summary.stages),
+      planSteps: mapPlanSteps(summary.stages),
+      toolActivities: mapToolActivities(summary),
+      verificationChecks: mapVerificationChecks(summary),
+      evidencePack: mapEvidencePack(summary),
+      routing: mapRouting(summary),
+    };
+  }
 
   lines.push(completed ? 'Done — here is what happened.' : 'Here is what happened.');
   lines.push('');
